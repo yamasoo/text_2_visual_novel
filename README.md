@@ -1,45 +1,59 @@
 # text_2_visual_novel
 
-把小說轉成 Ren'Py 視覺小說：匯入 → 章綱／角色抽取 → LLM 標註成 scene graph → 人工校對
-→ 美術／聲音 → Ren'Py 輸出 → 驗收打包。
+**把一本小說，變成一個可以玩的視覺小說遊戲。**
 
-> 「裝什麼、怎麼跑、repo 裡有什麼」。
+你給它小說文字，它幫你把每一段拆成旁白、台詞、說話者與表情，讓你在瀏覽器裡逐句校對，
+再產出立繪、背景、音樂，最後輸出一份可以直接開來玩的 Ren'Py 專案。
 
-## 這個 repo 有什麼
+這是一套「人在迴路」的工具：AI 做粗活，你只做判斷。標註完一定要校對，程式不會替你決定
+誰在說話——它只會把沒把握的地方標出來。
 
-| 路徑 | 內容 |
-|---|---|
-| `t2vn/` | 轉換管線與本機網頁工作台（FastAPI） |
-| `ui/` | 工作台前端（原生 JS，無框架） |
-| `schema/` | JSON Schema（scene／cast／manifest／chapter…） |
-| `config/` | 來源欄位對照表、ComfyUI workflow |
-| `docs/` | 規格、階段計畫、決策紀錄、任務卡 |
-| `tests/` | 測試（多數不需要小說資料就能跑） |
-| `vendor/` | 從 novel-studio、ruxi 複製的模組（各自保留 LICENSE 與 `VENDORED.md`） |
-| `skills/` | 給 Claude Code 用的專案技能 |
-| `library/sfx/` | 介面音效（Kenney，CC0） |
+---
 
-## 這個 repo **沒有**的東西
+## 它能幫你做什麼
 
-這些是刻意排除的，`.gitignore` 已擋住：
+| 階段 | 你做什麼 | 它做什麼 |
+|---|---|---|
+| **匯入** | 選小說資料夾，或直接丟 TXT／Markdown／DOCX／EPUB | 自動拆章、編段落號 |
+| **理解** | 按一個鍵 | 讀出章綱、情節點、角色表（誰是誰、是什麼身分） |
+| **標註** | 去泡杯茶 | 把每章變成場景與台詞：分場、旁白、說話者、表情、演出效果 |
+| **校對** | 左邊原文、右邊劇本，逐句修 | 標出推斷的說話者（`?`）、漏掉的敘述、不逐字的改寫 |
+| **美術** | 在「素材」頁挑風格、按生成 | 用 ComfyUI 出生立繪與背景，自動去背、對齊、命名 |
+| **聲音** | 選氣氛、按生成 | 產生 BGM 與環境音，管理音訊素材 |
+| **輸出** | 填一次 Ren'Py SDK 路徑 | 產生可執行的 Ren'Py 專案，並檢查缺素材、字型缺字 |
+| **驗收** | 按「開始驗收」 | 打包成 QA 包，用截圖驗證畫面與流程 |
 
-| 路徑 | 原因 |
-|---|---|
-| `works/` | 小說原文、標註、立繪、Ren'Py 建置產物（著作權與體積） |
-| `config.yaml` | 本機絕對路徑設定，由 `config.example.yaml` 複製而來 |
-| `reports/`、`_qa_review_2/` | 驗收截圖與暫存腳本 |
-| `vendor/fonts/` | Noto Serif TC（16 MB，OFL），需要時自行下載 |
-| `vendor/wildcards/` | wildcard 卡池，授權未載明，不隨 repo 散布 |
+## 你會得到什麼
+
+- **可以玩的遊戲** — Ren'Py 專案，開起來就能跑，也能打包成 Windows 執行檔
+- **校對過的劇本** — `works/<書>/scenes/chNNN.json`（機器可讀，之後要改編或重出都靠它）
+- **給人看的校對表** — `scenes/chNNN_review.md`，可以直接拿給別人審
+- **素材庫** — 立繪、背景、BGM、音效，統一命名與清單管理
+- **可重複的流程** — 同一本書改幾句、重跑一章，不用從頭來
 
 ## 需要什麼
 
-- **Python 3.10+**
-- **ffmpeg** — 聲音處理（S7）
-- **Ren'Py SDK 8.x** — 輸出與預檢（S5）
-- **ComfyUI** — 可選，出圖（S6）
-- **LLM** — DeepSeek API，或本機 llama.cpp（OpenAI 相容）
+**必備**
 
-## 快速開始
+| 項目 | 說明 |
+|---|---|
+| Windows 10／11 | 目前只在 Windows 實測過 |
+| Python 3.10 以上 | 安裝時記得勾「Add Python to PATH」 |
+| 小說文字 | TXT／Markdown／DOCX／EPUB；程式**只讀不寫**，不會動到你的原稿 |
+| 一個 LLM | DeepSeek API 金鑰，或本機跑的 llama.cpp |
+
+**選配（沒有也能用，只是少幾步）**
+
+| 項目 | 什麼時候需要 |
+|---|---|
+| ComfyUI ＋ 顯示卡 | 想自動生立繪／背景時 |
+| ffmpeg | 想處理音樂音效時 |
+| Ren'Py SDK 8.x | 想輸出成遊戲時 |
+
+**資源量級**：一本 20 萬字的小說，作品資料夾大約 1–3 GB（多數是圖片）。
+顯示卡用於出圖，沒有也可以先做劇本、之後再補圖。
+
+## 怎麼開始
 
 ```powershell
 git clone https://github.com/yamasoo/text_2_visual_novel.git
@@ -47,62 +61,65 @@ cd text_2_visual_novel
 .\start_studio.bat
 ```
 
-`start_studio.bat` 每次都會自己檢查並補齊，不用手動安裝：
+第一次執行會自動建虛擬環境、裝好套件、產生 `config.yaml`，然後打開
+<http://127.0.0.1:7866/>。
 
-1. 找 `venv`／`.venv`，都沒有就用 `python -m venv venv` 建一個
-2. `requirements.txt` 有變更、或匯入失敗，就 `pip install -r requirements.txt`
-3. 第一次執行時從 `config.example.yaml` 產生 `config.yaml`，`project_root` 自動指到這個資料夾
-4. 啟動工作台並開 <http://127.0.0.1:7866/>
+**唯一要手動改的**是 `config.yaml` 裡的 `book_library.path`——指向你放小說的那個資料夾。
 
-跑起來之後只要改 `config.yaml` 的 `book_library.path`（小說資料夾，唯讀，每本書一個子資料夾）。
+接著在網頁上：
 
-不想用 bat 的話，就等於這四行：
+1. **書架** → 匯入一本書
+2. 勾章節 → **抽取章綱與角色**
+3. 勾章節 → **AI 標註**（背景執行，可以看進度和花費）
+4. **章節** → 打開校對，把 `?` 和紅色提示修掉
+5. 想先看看 → **建立可玩原型**（HTML，不用 Ren'Py）
+6. 要正式版 → 設定 Ren'Py 路徑 → **匯出**
 
-```powershell
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-venv\Scripts\python -m t2vn.config --init
-venv\Scripts\python -m t2vn.server
-```
+## 費用大概多少
 
-服務只綁 `127.0.0.1`，並檢查 `Host`／`Origin`。
+成本幾乎都在 LLM 的 token。以 DeepSeek 的便宜模型計算，一章通常是幾萬 token，
+全書數十萬 token，換算下來是「一杯飲料到一頓飯」的量級；如果重試很多次會再往上。
+用本機 llama.cpp 則完全免費，代價是慢、而且需要夠大的顯示記憶體。
 
-## 金鑰
+金鑰只存在 Windows 憑證管理員（keyring），從網頁「設定」頁填入，**不會寫進檔案、不會上傳**。
 
-金鑰只存系統 **keyring**（沿用 novel-studio 的 `KEYRING_SERVICE`），可從網頁「設定」頁
-輸入與測試連線，但**不會**寫進 `config.yaml`、也不會回傳到前端。
+## 常見問題
 
-## 測試
+**Q：一定要有 API 金鑰嗎？**
+不一定。可以先用本機模型（llama.cpp）跑小章節試水溫；也可以只匯入、只校對，不呼叫模型。
 
-```powershell
-venv\Scripts\pip install -r requirements-dev.txt
-python -m pytest -q
-```
+**Q：它會改我的原稿嗎？**
+不會。小說資料夾是唯讀的，所有產出都寫在 `works/`。
 
-`tests/annotate` 與 `tests/chunked` 用作者本機的 `works/sample_book` 當人工黃金集
-（不進 repo）；沒有那份資料時整組 **skip**，不會失敗。
-`tests/annotate/test_synthetic_book.py` 用自造的迷你書覆蓋同一條管線，
-clone 之後仍會執行。
+**Q：標註完可以直接用嗎？**
+強烈建議校對。AI 很會抓場景與對白，但「這句話是誰說的」常常需要人判斷，所以介面會把
+沒把握的行標成 `?`。
 
-## 文件
+**Q：可以只做劇本、不做美術嗎？**
+可以。輸出時缺的素材會用佔位圖補上，先能玩，之後再補。
+
+## 這個 repo 裡沒有什麼
+
+為了尊重原稿與授權，以下**不會**出現在 repo 裡（`.gitignore` 已排除）：
+
+- `works/` — 小說原文、標註結果、圖片、遊戲建置產物
+- `config.yaml` — 你自己的本機路徑設定
+- `vendor/fonts/`、`vendor/wildcards/` — 第三方素材，需要時自行下載
+
+## 想更深入了解
 
 | 文件 | 內容 |
 |---|---|
-| [docs/05_資料格式規格.md](docs/05_資料格式規格.md) | 目錄權限、命名規則、輸入輸出格式 |
-| [docs/20_標註規則.md](docs/20_標註規則.md) | op 語法與標註規則 |
-| [docs/30_RenPy匯出規格.md](docs/30_RenPy匯出規格.md) | Ren'Py 輸出結構 |
-| [docs/31_美術管線規格.md](docs/31_美術管線規格.md) | 美術素材與出圖管線 |
-| [docs/32_外型卡規格.md](docs/32_外型卡規格.md) | 外型卡與 wildcard |
+| [docs/05_資料格式規格.md](docs/05_資料格式規格.md) | 資料夾權限、命名規則、輸入輸出格式 |
+| [docs/20_標註規則.md](docs/20_標註規則.md) | 旁白／台詞怎麼拆、說話者怎麼判斷 |
+| [docs/30_RenPy匯出規格.md](docs/30_RenPy匯出規格.md) | Ren'Py 專案結構與命名 |
+| [docs/31_美術管線規格.md](docs/31_美術管線規格.md) | 立繪、背景與出圖流程 |
+| [docs/32_外型卡規格.md](docs/32_外型卡規格.md) | 角色外型與 wildcard 卡池 |
 
-## 相關專案
-
-- [yamasoo/novel-studio](https://github.com/yamasoo/novel-studio) — 小說寫作工作台（MIT），本專案沿用其 provider／keyring 機制
-- [zenstory-ai/novel-to-game](https://github.com/zenstory-ai/novel-to-game)（MIT）
-- [swaylq/ruxi-skill](https://github.com/swaylq/ruxi-skill)（MIT）
+想跑測試或參與開發：`pip install -r requirements-dev.txt` 後執行 `pytest`。
 
 ## 授權
 
 本專案為 MIT，見 [LICENSE](LICENSE)。
-
-`vendor/` 下的程式與素材各自依原授權：`vendor/novel_studio/LICENSE`、
-`vendor/ruxi/LICENSE`、`library/sfx/kenney_interface/LICENSE.txt`（CC0）。
+`vendor/` 下的程式與素材各自依原授權（`vendor/novel_studio/LICENSE`、`vendor/ruxi/LICENSE`、
+`library/sfx/kenney_interface/LICENSE.txt`）。
