@@ -1,0 +1,15 @@
+# 執行期依賴
+pyyaml>=6.0
+jsonschema>=4.20
+# 選用：存放 LLM 金鑰到系統 keyring（沿用 novel-studio 的做法）
+keyring>=24
+# 校對／編輯介面（python -m t2vn.server）
+fastapi>=0.110
+uvicorn>=0.27
+# 選用：簡體轉台灣繁體（匯入 TXT／EPUB 時勾選「簡體轉台灣繁體」）
+opencc-python-reimplemented>=0.1.7
+# S5 Ren'Py 匯出周邊工具（字型 subset、佔位素材）
+fonttools>=4.40
+Pillow>=10
+# 畫風庫匯入（讀 .xlsx）
+openpyxl>=3.1

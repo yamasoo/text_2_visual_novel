@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scene.schema.json",
+  "title": "VN scene graph (one file per chapter)",
+  "description": "Format version 0.1. Keys are ASCII; display text may be any language.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "chapter_id", "lang", "scenes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "$ref": "#/$defs/id" },
+    "chapter_id": { "type": "string", "pattern": "^ch[0-9]{3}$" },
+    "lang": { "$ref": "#/$defs/lang" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "paragraphs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scene" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,62}$" },
+    "lang": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$" },
+    "i18n": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/lang" },
+      "additionalProperties": { "type": "string" }
+    },
+    "scene_id": { "type": "string", "pattern": "^ch[0-9]{3}_sc[0-9]{2}$" },
+    "target": {
+      "type": "string",
+      "pattern": "^(ch[0-9]{3}_sc[0-9]{2}|end_[a-z0-9_]+)$"
+    },
+    "expr": {
+      "enum": ["neutral", "smile", "sad", "angry", "surprised", "worried", "serious", "embarrassed"]
+    },
+    "scene": {
+      "type": "object",
+      "required": ["scene_id", "location_id", "time_of_day", "bg", "lines"],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": { "$ref": "#/$defs/scene_id" },
+        "title": { "$ref": "#/$defs/i18n" },
+        "location_id": { "$ref": "#/$defs/id" },
+        "time_of_day": { "enum": ["dawn", "morning", "day", "dusk", "night"] },
+        "weather": { "enum": ["clear", "cloudy", "rain", "storm", "fog"] },
+        "bg": {
+          "type": "object",
+          "required": ["asset_id"],
+          "additionalProperties": false,
+          "properties": { "asset_id": { "$ref": "#/$defs/id" } }
+        },
+        "bgm": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "ambience": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "cast": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["char_id"],
+            "additionalProperties": false,
+            "properties": {
+              "char_id": { "$ref": "#/$defs/id" },
+              "expr": { "$ref": "#/$defs/expr" },
+              "pos": { "enum": ["left", "center", "right"] }
+            }
+          }
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/line" }
+        },
+        "next": { "anyOf": [{ "$ref": "#/$defs/target" }, { "type": "null" }] }
+      }
+    },
+    "line": {
+      "oneOf": [
+        { "$ref": "#/$defs/line_narration" },
+        { "$ref": "#/$defs/line_dialogue" },
+        { "$ref": "#/$defs/line_choice" },
+        { "$ref": "#/$defs/line_direction" }
+      ]
+    },
+    "line_narration": {
+      "type": "object",
+      "required": ["type", "text", "source_para"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "narration" },
+        "text": { "type": "string", "maxLength": 90 },
+        "source_para": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "line_dialogue": {
+      "type": "object",
+      "required": ["type", "speaker", "text", "source_para"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "dialogue" },
+        "speaker": { "$ref": "#/$defs/id" },
+        "expr": { "$ref": "#/$defs/expr" },
+        "text": { "type": "string", "maxLength": 90 },
+        "sfx": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "source_para": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "line_choice": {
+      "type": "object",
+      "required": ["type", "prompt", "options"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "choice" },
+        "prompt": { "type": "string" },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["option_id", "label", "goto", "source_para"],
+            "additionalProperties": false,
+            "properties": {
+              "option_id": { "$ref": "#/$defs/id" },
+              "label": { "type": "string" },
+              "goto": { "$ref": "#/$defs/target" },
+              "source_para": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "line_direction": {
+      "type": "object",
+      "required": ["type", "effect"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "direction" },
+        "effect": { "enum": ["none", "shake", "flash", "fade_in", "fade_out"] }
+      }
+    }
+  }
+}

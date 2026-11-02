@@ -1,0 +1,36 @@
+# 複製為 config.yaml 後填寫。config.yaml 不進 git。
+# 金鑰不寫在這裡，存系統 keyring（沿用 novel-studio 的 KEYRING_SERVICE 機制）。
+# key 一律英文；值可以是中文路徑。
+
+project_root: E:\text_2_visual_novel        # 讀寫
+# works_dir: E:\text_2_visual_novel_works   # 選填：作品（匯入的章節、標註、原型、之後的圖）放哪裡；沒填就是 <project_root>\works
+
+server:
+  port: 7866                                # 校對／編輯介面（python -m t2vn.server）的埠號
+
+book_library:
+  path: D:\books\小說                        # 唯讀：小說來源，每本書一個子資料夾（改成你的書庫路徑）
+  access: read_only
+
+reference_sources:
+  novel_studio:
+    path: E:\novel-studio                   # 唯讀：只用來複製模組
+    access: read_only
+    commit: ""                              # 複製模組時填入 git rev-parse HEAD 的結果
+
+books:
+  - book_id: sample_book
+    source_dir: 示範小說              # 相對於 book_library.path
+    lang: zh-TW
+    display_name:
+      zh-TW: 示範小說
+    enabled: true
+
+llm:
+  provider: deepseek                        # 可選：deepseek | llamacpp
+  model: deepseek-flash                     # 預設用便宜的 flash；難的章節可改 deepseek-v4-pro（網頁介面的「設定」頁也能改）
+  thinking: "off"                           # off | low | high | max（DeepSeek 思考模式；加引號，YAML 的 off 會被當成 false）
+  max_output: 32768                         # 單次回應的 token 上限
+
+comfyui:
+  base_url: http://127.0.0.1:8188

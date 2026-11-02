@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "appearance_card",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "char_id",
+    "confirmed",
+    "headshot_prompt",
+    "sprite_prompt",
+    "expressions",
+    "notes"
+  ],
+  "properties": {
+    "char_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "confirmed": {
+      "type": "boolean"
+    },
+    "headshot_prompt": {
+      "type": "string"
+    },
+    "sprite_prompt": {
+      "type": "string"
+    },
+    "expressions": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "neutral",
+          "smile",
+          "angry",
+          "sad",
+          "laughing"
+        ]
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

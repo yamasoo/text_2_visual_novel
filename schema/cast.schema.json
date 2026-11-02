@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cast.schema.json",
+  "title": "Character table (one file per book)",
+  "description": "Format version 0.1. Character IDs are ASCII; names and aliases are display/source text.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "characters"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,30}$" },
+    "characters": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{1,62}$" },
+      "additionalProperties": { "$ref": "#/$defs/character" }
+    }
+  },
+  "$defs": {
+    "character": {
+      "type": "object",
+      "required": ["names", "aliases", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "names": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$" },
+          "additionalProperties": { "type": "string" }
+        },
+        "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "role": { "enum": ["protagonist", "main", "supporting", "antagonist", "minor", "player"] },
+        "one_line": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$" },
+          "additionalProperties": { "type": "string" }
+        },
+        "first_chapter": { "type": "string", "pattern": "^ch[0-9]{3}$" },
+        "hue": { "type": "integer", "minimum": 0, "maximum": 360 },
+        "shape": { "enum": ["tall", "broad", "small", "bent", "round"] },
+        "visual_tags": { "type": "array", "items": { "type": "string" } },
+        "expressions": {
+          "type": "array",
+          "items": {
+            "enum": ["neutral", "smile", "sad", "angry", "surprised", "worried", "serious", "embarrassed"]
+          }
+        }
+      }
+    }
+  }
+}

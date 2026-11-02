@@ -1,0 +1,30 @@
+# 本機設定（由 config.example.yaml 複製）
+config.yaml
+*.bak
+.env
+.env.*
+
+# 作品資料：小說原文、標註、圖、Ren'Py 建置產物
+works/
+build/
+out/
+reports/
+*.zip
+
+# 第三方素材（需要時自行下載）
+vendor/fonts/
+vendor/wildcards/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 本機安裝的 skill 副本（來源在 skills/）
+.claude/
+
+.DS_Store
+Thumbs.db
+*.log

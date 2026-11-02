@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chapter.schema.json",
+  "title": "Normalized chapter text (one file per chapter, works/<book_id>/chapters/chNNN.json)",
+  "description": "Format version 0.1. Produced by tools/normalize_book.py from the read-only book library.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "chapter_id", "chapter_no", "title", "source_file", "sha256", "char_count", "paragraphs", "scene_breaks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,30}$" },
+    "chapter_id": { "type": "string", "pattern": "^ch[0-9]{3}$" },
+    "chapter_no": { "type": "integer", "minimum": 1, "maximum": 999 },
+    "title": { "type": "string" },
+    "source_file": { "type": "string", "minLength": 1 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "char_count": { "type": "integer", "minimum": 0 },
+    "paragraphs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["para_no", "text"],
+        "additionalProperties": false,
+        "properties": {
+          "para_no": { "type": "integer", "minimum": 1 },
+          "text": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "scene_breaks": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 2 }
+    }
+  }
+}

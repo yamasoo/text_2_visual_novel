@@ -1,0 +1,19 @@
+Ren'Py 8.5.3.26051504 lint report, generated at: Mon Nov  2 16:00:00 2026
+
+game/vn_ch001.rpy:12 The image named 'ellie_reed angry' was not found.
+game/vn_ch002.rpy:40 The character c_ghost is used but is not
+    defined with define.
+game/vn_ch002.rpy:44 Strange text 'foo' (style warning).
+
+game/options.rpy:3 Unknown style property 'colour'.
+
+Statistics:
+
+The game contains 541 dialogue blocks, containing 556 words and 18,027
+characters, for an average of 1.0 words and 33 characters per block.
+
+The game contains 2 menus, 71 images, and 25 screens.
+
+
+Lint is not a substitute for thorough testing. Remember to update
+Ren'Py before releasing. New releases fix bugs and improve compatibility.

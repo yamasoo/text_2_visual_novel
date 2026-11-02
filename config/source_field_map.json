@@ -1,0 +1,103 @@
+{
+  "_comment": "Maps novel-studio source metadata (Chinese keys and values) to ASCII keys. Read-only input mapping; the rest of the pipeline never sees Chinese keys. Unmapped keys must raise an error.",
+  "_schema_version": "0.1",
+  "source_paths": {
+    "chapter_text_dir": "正文",
+    "chapter_outline_dir": "大綱/章綱",
+    "character_dir": "設定/角色",
+    "glossary_file": "設定/名詞表.md",
+    "chapter_summary_dir": "追蹤/章節摘要"
+  },
+  "chapter_outline": {
+    "類型": "doc_type",
+    "章號": "chapter_no",
+    "章名": "chapter_title",
+    "所屬卷": "volume_title",
+    "所屬單元": "arc_title",
+    "字數目標": "word_target",
+    "狀態": "status"
+  },
+  "character_card": {
+    "類型": "doc_type",
+    "名稱": "name",
+    "別名": "aliases",
+    "定位": "role",
+    "首次登場": "first_appearance",
+    "狀態": "status"
+  },
+  "chapter_summary": {
+    "類型": "doc_type",
+    "章號": "chapter_no",
+    "章名": "chapter_title",
+    "字數": "word_count"
+  },
+  "glossary_doc": {
+    "類型": "doc_type"
+  },
+  "doc_type_values": {
+    "章綱": "chapter_outline",
+    "角色": "character_card",
+    "章節摘要": "chapter_summary",
+    "名詞表": "glossary"
+  },
+  "status_values": {
+    "已寫": "written",
+    "已確認": "confirmed",
+    "正式": "official"
+  },
+  "role_values": {
+    "主角": "protagonist",
+    "主要配角": "main",
+    "配角": "supporting",
+    "反派": "antagonist",
+    "路人": "minor"
+  },
+  "outline_sections": {
+    "本章四問": "four_questions",
+    "本章功能與目標情緒": "function_and_mood",
+    "情節點": "plot_points",
+    "出場角色": "cast_names",
+    "伏筆操作": "foreshadow_ops",
+    "禁止事項": "forbidden",
+    "章末鉤子": "hook",
+    "備註": "notes"
+  },
+  "character_sections": {
+    "一句話": "one_line",
+    "外在": "appearance",
+    "內在": "inner",
+    "說話方式（聲音卡）": "voice",
+    "關係": "relations",
+    "角色弧線": "arc",
+    "備註": "notes"
+  },
+  "glossary_columns": {
+    "名詞": "term",
+    "類別": "category",
+    "說明": "description",
+    "注意": "note"
+  },
+  "glossary_category_values": {
+    "物品": "item",
+    "科技": "technology",
+    "制度": "institution",
+    "地理": "geography",
+    "人物": "person",
+    "角色": "character",
+    "組織": "organization",
+    "地點": "place",
+    "派系": "faction",
+    "兵器": "weapon",
+    "事件": "event",
+    "職稱": "job_title",
+    "戰術": "tactic",
+    "名詞": "term"
+  },
+  "chapter_text_title_pattern": "^#\\s*第([0-9]+)章\\s*(.*)$",
+  "chapter_text_file_pattern": "^第([0-9]+)章(?:_(.+))?\\.md$",
+  "chapter_outline_file_pattern": "^第([0-9]+)章\\.md$",
+  "first_appearance_pattern": "^(?:第[0-9]+卷)?第([0-9]+)章",
+  "glossary_first_appearance_pattern": "首次出現：第([0-9]+)章",
+  "scene_break_pattern": "^([*＊\\-—◇◆·・]\\s*){3,}$",
+  "txt_chapter_heading": "第{chapter_no}章"
+}

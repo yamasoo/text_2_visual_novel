@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "outline.schema.json",
+  "title": "Chapter outline (works/<book_id>/outlines/chNNN.json)",
+  "description": "Format version 0.1. Produced by t2vn.extract (LLM) or edited by hand. Used as scene-splitting hints when annotating books that have no outline in the book library.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "chapter_id", "chapter_no", "summary", "sections", "origin"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,30}$" },
+    "chapter_id": { "type": "string", "pattern": "^ch[0-9]{3}$" },
+    "chapter_no": { "type": "integer", "minimum": 1, "maximum": 999 },
+    "summary": { "type": "string" },
+    "sections": {
+      "type": "object",
+      "propertyNames": { "enum": ["plot_points", "cast_names"] },
+      "additionalProperties": { "type": "string" }
+    },
+    "origin": { "enum": ["llm_extract", "manual"] }
+  }
+}

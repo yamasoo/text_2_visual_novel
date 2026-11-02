@@ -1,0 +1,121 @@
+{
+ "1": {
+  "class_type": "CheckpointLoaderSimple",
+  "inputs": {
+   "ckpt_name": "yue2_3b_int8_convrot.safetensors"
+  }
+ },
+ "2": {
+  "class_type": "YuE2GenerateMusic",
+  "inputs": {
+   "clip": [
+    "1",
+    1
+   ],
+   "style": "Cinematic ambient underscore, 70 bpm. Warm piano and soft strings, gentle pads, light percussion. Calm, reflective, hopeful mood. pure instrumental, no vocals",
+   "lyrics": "[Intro]\n(Soft piano, atmospheric pads)\n\n[Verse 1]\n(Steady gentle rhythm, melody on piano)\n\n[Chorus]\n(Strings join, warm and open)\n\n[Verse 2]\n(Back to piano and pads)\n\n[Outro]\n(Final chord fading to silence)",
+   "abc": [
+    "8",
+    0
+   ],
+   "seed": 1046770434024909,
+   "mode": "full",
+   "max_duration": 120,
+   "temperature": 1,
+   "top_p": 0.95,
+   "top_k": 100,
+   "repetition_penalty": 1.2,
+   "cfg_scale": 1
+  }
+ },
+ "3": {
+  "class_type": "ConditioningZeroOut",
+  "inputs": {
+   "conditioning": [
+    "2",
+    0
+   ]
+  }
+ },
+ "4": {
+  "class_type": "EmptyYuE2LatentAudio",
+  "inputs": {
+   "seconds": [
+    "2",
+    1
+   ],
+   "batch_size": 1
+  }
+ },
+ "5": {
+  "class_type": "KSampler",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "positive": [
+    "2",
+    0
+   ],
+   "negative": [
+    "3",
+    0
+   ],
+   "latent_image": [
+    "4",
+    0
+   ],
+   "seed": 1046770434024909,
+   "steps": 32,
+   "cfg": 1,
+   "sampler_name": "dpm_2",
+   "scheduler": "sgm_uniform",
+   "denoise": 1
+  }
+ },
+ "6": {
+  "class_type": "VAEDecodeAudio",
+  "inputs": {
+   "samples": [
+    "5",
+    0
+   ],
+   "vae": [
+    "1",
+    2
+   ]
+  }
+ },
+ "7": {
+  "class_type": "SaveAudioAdvanced",
+  "inputs": {
+   "audio": [
+    "6",
+    0
+   ],
+   "filename_prefix": "audio/yue2_bgm",
+   "format": "opus",
+   "format.quality": "128k"
+  }
+ },
+ "8": {
+  "class_type": "YuE2GenerateABC",
+  "inputs": {
+   "clip": [
+    "1",
+    1
+   ],
+   "style": "Cinematic ambient underscore, 70 bpm. Warm piano and soft strings, gentle pads, light percussion. Calm, reflective, hopeful mood. pure instrumental, no vocals",
+   "lyrics": "[Intro]\n(Soft piano, atmospheric pads)\n\n[Verse 1]\n(Steady gentle rhythm, melody on piano)\n\n[Chorus]\n(Strings join, warm and open)\n\n[Verse 2]\n(Back to piano and pads)\n\n[Outro]\n(Final chord fading to silence)",
+   "seed": 1046770434024909,
+   "mode": "full",
+   "max_abc_tokens": 8192,
+   "temperature": 0.7,
+   "top_p": 0.9,
+   "top_k": 30,
+   "repetition_penalty": 1.005,
+   "penalty_window": 100
+  }
+ }
+}
