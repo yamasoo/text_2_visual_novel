@@ -1,0 +1,3 @@
+# vendor/ 的檔案雜湊寫在 VENDORED.md，tests/vendor 會逐位元比對；
+# 換行被轉換會讓雜湊在 Linux 上對不起來，所以這兩個資料夾不做換行正規化。
+vendor/** -text
