@@ -42,7 +42,7 @@
 ## 快速開始
 
 ```powershell
-git clone https://github.com/<你的帳號>/text_2_visual_novel.git
+git clone https://github.com/yamasoo/text_2_visual_novel.git
 cd text_2_visual_novel
 .\start_studio.bat
 ```
