@@ -14,6 +14,17 @@
 
 ---
 
+```mermaid
+flowchart LR
+  A[小說 TXT / DOCX / EPUB] --> B[拆章、角色表]
+  B --> C[標註 scene graph]
+  C --> D[人工校對]
+  D --> E[立繪 / 背景 / BGM]
+  D --> F[sherpa-onnx 語音]
+  E --> G[Ren'Py 專案]
+  F --> G
+```
+
 ## 它能幫你做什麼
 
 | 階段 | 你做什麼 | 它做什麼 |
