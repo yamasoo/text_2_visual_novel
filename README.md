@@ -25,6 +25,14 @@ flowchart LR
   F --> G
 ```
 
+## 先玩看看
+
+[下載 Windows 試玩版](https://github.com/yamasoo/text_2_visual_novel/releases/latest)（約 96 MB）
+
+解壓後進入資料夾，執行裡面的 `.exe`。不需要安裝 Ren'Py 或 Python。
+
+這是《示範》的實驗章節，不是完整商業版；Windows 第一次執行可能出現 SmartScreen 警告。
+
 ## 它能幫你做什麼
 
 | 階段 | 你做什麼 | 它做什麼 |
