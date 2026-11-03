@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "book_id": "sample_book",
+  "engine": "moss-voicegenerator-1.7b",
+  "characters": {
+    "ellie_reed": {
+      "source": "voice_design_prompt",
+      "voice_design_prompt": "年輕女性，聲音清澈、略帶沙啞，語速中等，說中文。",
+      "seed": 4217,
+      "language": "zh",
+      "max_new_tokens": 256
+    },
+    "lao_zhang": {
+      "source": "voice_design_prompt",
+      "voice_design_prompt": "低沉、緩慢、略帶沙啞的中年男性，說中文。",
+      "seed": 9173,
+      "language": "zh",
+      "max_new_tokens": 256
+    }
+  }
+}

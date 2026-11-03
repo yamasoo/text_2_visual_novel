@@ -59,6 +59,7 @@ EXCLUDED_DIR_NAMES = frozenset(
         "__pycache__",
         "node_modules",
         "vendor",
+        "models",
         "build",
         "out",
         "works",

@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "book_id": "sample_book",
+  "engine": "sherpa-onnx",
+  "sherpa_model": "models/sherpa/vits-zh-hf-fanchen-C",
+  "characters": {
+    "ellie_reed": {
+      "source": "speaker_id",
+      "speaker_id": 0,
+      "speed": 1.0,
+      "language": "zh",
+      "note": "先用 speaker 0 試聽，再換成你喜歡的 id。"
+    },
+    "lao_zhang": {
+      "source": "speaker_id",
+      "speaker_id": 1,
+      "speed": 1.0,
+      "language": "zh",
+      "note": "先用 speaker 1 試聽，再換成你喜歡的 id。"
+    }
+  }
+}

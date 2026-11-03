@@ -1,0 +1,35 @@
+{
+  "1": {
+    "class_type": "MossTTSModelLoader",
+    "inputs": {
+      "model_variant": "MOSS-VoiceGenerator",
+      "local_model_path": "",
+      "codec_local_path": ""
+    }
+  },
+  "2": {
+    "class_type": "MossTTSVoiceDesign",
+    "inputs": {
+      "moss_pipe": ["1", 0],
+      "language": "zh",
+      "text": "",
+      "instruction": "",
+      "seed": 0,
+      "temperature": 1.5,
+      "top_p": 0.6,
+      "top_k": 50,
+      "repetition_penalty": 1.1,
+      "max_new_tokens": 4096,
+      "head_handle": 0.05,
+      "tail_handle": 0.05
+    }
+  },
+  "3": {
+    "class_type": "SaveAudioAdvanced",
+    "inputs": {
+      "audio": ["2", 0],
+      "filename_prefix": "voice/design",
+      "format": "flac"
+    }
+  }
+}

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import sprite_fallback
+from . import sprite_fallback, voice_lines
 from .errors import T2vnError, WriteProtectedError
 
 SCHEMA_VERSION = "0.1"
@@ -141,11 +141,13 @@ def render_export(
     audio_file: Callable[[str, str], str | None],
     font_file: str | None = None,
     captions: bool = True,
+    voice_file: Callable[[str], str | None] | None = None,
 ) -> Rendered:
     """產生所有 .rpy 檔的內容與 ``vn_export.json``。
 
     ``exists(rel)``：相對 game/ 的檔案是否存在（背景、立繪用）；
-    ``audio_file(kind, asset_id)``：回傳相對 game/ 的音檔路徑（kind 為 bgm／ambience），沒有檔回傳 None。
+    ``audio_file(kind, asset_id)``：回傳相對 game/ 的音檔路徑（kind 為 bgm／ambience），沒有檔回傳 None；
+    ``voice_file(line_id)``：回傳該句的語音路徑（相對 game/），沒有配音回傳 None。
     """
     if not chapters:
         raise ExportError("no chapters to export")
@@ -167,6 +169,7 @@ def render_export(
     sprites: dict[tuple[str, str], None] = {}
     slot_names_used: set[str] = set()
     audio_ids: dict[tuple[str, str], None] = {}
+    out_voices: list[dict[str, Any]] = []
 
     playing: dict[str, str | None] = {"bgm": None, "ambience": None}
     labels_seen: set[str] = set()
@@ -237,7 +240,7 @@ def render_export(
                     playing[kind] = target
 
             blacked_state: dict[str, tuple[str, str]] | None = None
-            for line in scene["lines"]:
+            for line_index, line in enumerate(scene["lines"], 1):
                 kind = line["type"]
                 if kind == "choice":
                     raise ExportError(f"{sid}: choice lines are not supported in v1 (D1)")
@@ -273,6 +276,13 @@ def render_export(
                         emit(f"    show {speaker} {expr}")
                         sprites.setdefault((speaker, expr), None)
                         shown[speaker] = (expr, shown[speaker][1])
+                if voice_file is not None:
+                    line_id = voice_lines.line_id(sid, line_index)
+                    voice_path = voice_file(line_id)
+                    if voice_path:
+                        emit(f'    voice "{voice_path}"')
+                        out_voices.append({"line_id": line_id, "speaker": speaker, "file": voice_path,
+                                           "present": True})
                 emit(f'    c_{speaker} "{text}"{tail}')
 
             target = scene.get("next")
@@ -397,7 +407,7 @@ def render_export(
     out.manifest = {
         "schema_version": SCHEMA_VERSION, "book_id": book_id, "title": title, "chapters": chapter_ids,
         "backgrounds": [{**bg, "present": exists(bg["file"])} for bg in backgrounds.values()],
-        "sprites": sprite_items, "audio": audio_items,
+        "sprites": sprite_items, "audio": audio_items, "voices": out_voices,
         "font": {"file": font_file, "present": exists(font_file)} if font_file else None,
     }
     return out
@@ -468,8 +478,12 @@ def export_book(
     captions: bool = True,
     clean: bool = False,
     placeholders: bool = False,
+    voice: bool = True,
 ) -> ExportResult:
-    """匯出到 Ren'Py 專案的 ``game/``。``project_dir`` 沒給就用 ``works/<book>/build/renpy``（獨立模式）。"""
+    """匯出到 Ren'Py 專案的 ``game/``。``project_dir`` 沒給就用 ``works/<book>/build/renpy``（獨立模式）。
+
+    ``voice=False`` 時完全不看 ``voice/VoiceMap.json``，輸出與舊版相同。
+    """
     book = config.book(book_id)
     work = config.work_dir(book_id)
     if project_dir is None:
@@ -555,6 +569,30 @@ def export_book(
             _copy(config, src, game / "audio" / "bgm" / f"{TITLE_BGM_ID}{ext}")
             copied.append(f"audio/bgm/{TITLE_BGM_ID}{ext}")
             break
+
+    # 語音：只帶 VoiceMap 有記錄且存在的檔案（孤兒音檔不進遊戲）
+    voice_lookup: dict[str, str] = {}
+    if voice:
+        voice_entries = (voice_lines.load_voice_map(work).get("lines") or {})
+        for chapter in chapters:
+            for scene in chapter.doc.get("scenes", []):
+                sid = str(scene.get("scene_id") or "")
+                for index, line in enumerate(scene.get("lines") or [], 1):
+                    if line.get("type") != "dialogue":
+                        continue
+                    line_id = voice_lines.line_id(sid, index)
+                    entry = voice_entries.get(line_id)
+                    if not isinstance(entry, dict):
+                        continue
+                    speaker = str(entry.get("speaker") or line.get("speaker") or "")
+                    rel = voice_lines.voice_paths(chapter.chapter_id, speaker, line_id)["file"]
+                    work_rel = str(entry.get("work_file") or "")
+                    src = work / work_rel if work_rel else assets / rel[len("audio/"):]
+                    if src.is_file():
+                        _copy(config, src, game / rel)
+                        copied.append(rel)
+                    if (game / rel).is_file():
+                        voice_lookup[line_id] = rel
     if font_rel:
         _copy(config, Path(font), game / font_rel)
 
@@ -567,7 +605,8 @@ def export_book(
 
     rendered = render_export(
         book_id=book_id, title=title, lang=lang, chapters=chapters, cast_doc=cast_doc, style=style,
-        exists=lambda rel: (game / rel).is_file(), audio_file=audio_file, font_file=font_rel, captions=captions)
+        exists=lambda rel: (game / rel).is_file(), audio_file=audio_file, font_file=font_rel, captions=captions,
+        voice_file=(lambda line_id: voice_lookup.get(line_id)) if voice else None)
 
     written: list[str] = []
     for name, text in rendered.files.items():
@@ -610,12 +649,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-captions", action="store_true")
     parser.add_argument("--clean", action="store_true", help="delete earlier game/vn_*.rpy first")
     parser.add_argument("--placeholders", action="store_true", help="draw placeholder images for missing backgrounds and sprites")
+    parser.add_argument("--no-voice", action="store_true", help="ignore voice/VoiceMap.json (no voice statements)")
     parser.add_argument("--config", default=None)
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
         result = export_book(config, args.book, parse_chapter_range(args.chapters), args.project, args.font,
-                             captions=not args.no_captions, clean=args.clean, placeholders=args.placeholders)
+                             captions=not args.no_captions, clean=args.clean, placeholders=args.placeholders,
+                             voice=not args.no_voice)
     except (T2vnError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

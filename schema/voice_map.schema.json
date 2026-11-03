@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "voice_map.schema.json",
+  "title": "Voice map (one entry per generated dialogue line)",
+  "description": "Format version 0.1. Keyed by line_id; records where the audio is and how it was made.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "lines"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "$ref": "#/$defs/id" },
+    "engine": { "$ref": "#/$defs/engine" },
+    "updated": { "type": "string" },
+    "designs": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["file", "seed", "config_hash"],
+        "additionalProperties": false,
+        "properties": {
+          "file": { "type": "string", "pattern": "^voice/refs/" },
+          "seed": { "type": "integer", "minimum": 0 },
+          "config_hash": { "type": "string", "minLength": 16 },
+          "created": { "type": "string" }
+        }
+      }
+    },
+    "lines": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/line_id" },
+      "additionalProperties": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,62}$" },
+    "line_id": { "type": "string", "pattern": "^ch[0-9]{3}_sc[0-9]{2}_l[0-9]{3}$" },
+    "engine": {
+      "enum": ["moss-tts-local-1.7b", "moss-tts-delay-8b", "moss-voicegenerator-1.7b", "sherpa-onnx"]
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "line_id", "speaker", "chapter", "scene_id", "text", "audio", "file",
+        "source", "engine", "seed", "text_hash", "config_hash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "line_id": { "$ref": "#/$defs/line_id" },
+        "speaker": { "$ref": "#/$defs/id" },
+        "chapter": { "type": "string", "pattern": "^ch[0-9]{3}$" },
+        "scene_id": { "type": "string", "pattern": "^ch[0-9]{3}_sc[0-9]{2}$" },
+        "text": { "type": "string", "minLength": 1 },
+        "audio": { "type": "string", "pattern": "^game/audio/voice/" },
+        "file": { "type": "string", "pattern": "^audio/voice/" },
+        "work_file": { "type": "string" },
+        "source": {
+          "enum": ["reference_audio", "voice_design_prompt", "design_then_clone", "speaker_id"]
+        },
+        "engine": { "$ref": "#/$defs/engine" },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "text_hash": { "type": "string", "minLength": 16 },
+        "config_hash": { "type": "string", "minLength": 16 },
+        "duration": { "type": "number", "minimum": 0 },
+        "sample_rate": { "type": "integer", "minimum": 0 },
+        "created": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

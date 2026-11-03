@@ -234,8 +234,8 @@ async function browse(onPick, { dirs = false, start = "" } = {}) {
         h("div", { class: "row small", style: "margin:6px 0" }, h("span", { class: "muted grow" }, data.path || "（選一個起點）"),
           dirs && data.path ? h("button", { class: "primary sm", onclick: () => { onPick(data.path); close(); } }, "選這個資料夾") : ""),
         data.parent ? h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(data.parent); } }, "↑ 上一層")) : "",
-        data.dirs.map((d) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(join(d)); } }, "📁 " + d))),
-        data.files.map((f) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); onPick(join(f)); close(); } }, "📄 " + f))));
+        ...data.dirs.map((d) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(join(d)); } }, "📁 " + d))),
+        ...data.files.map((f) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); onPick(join(f)); close(); } }, "📄 " + f))));
     } catch (error) { fail(error); }
   }
   open(start);

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cast_voice.schema.json",
+  "title": "Voice cast configuration (MOSS-TTS or sherpa-onnx)",
+  "description": "Format version 0.1. One explicit voice definition per character. Keys are ASCII.",
+  "type": "object",
+  "required": ["schema_version", "book_id", "characters"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "book_id": { "$ref": "#/$defs/id" },
+    "engine": { "$ref": "#/$defs/engine" },
+    "sherpa_model": { "type": "string", "minLength": 1 },
+    "characters": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "$ref": "#/$defs/voice" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,62}$" },
+    "engine": {
+      "enum": ["moss-tts-local-1.7b", "moss-tts-delay-8b", "moss-voicegenerator-1.7b", "sherpa-onnx"]
+    },
+    "voice": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": ["reference_audio", "voice_design_prompt", "design_then_clone", "speaker_id"]
+        },
+        "speaker_id": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+        "reference_audio": { "type": "string", "minLength": 1 },
+        "voice_design_prompt": { "type": "string", "minLength": 1 },
+        "design_reference": { "type": "string", "minLength": 1 },
+        "design_text": { "type": "string", "minLength": 1 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "language": { "enum": ["auto", "zh", "en", "ja", "ko"] },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 5 },
+        "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
+        "top_k": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "repetition_penalty": { "type": "number", "minimum": 0.5, "maximum": 2 },
+        "max_new_tokens": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "enabled": { "type": "boolean" },
+        "note": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "source": { "const": "reference_audio" } },
+            "required": ["source"]
+          },
+          "then": { "required": ["reference_audio"] }
+        },
+        {
+          "if": {
+            "properties": { "source": { "enum": ["voice_design_prompt", "design_then_clone"] } },
+            "required": ["source"]
+          },
+          "then": { "required": ["voice_design_prompt"] }
+        },
+        {
+          "if": {
+            "properties": { "source": { "const": "speaker_id" } },
+            "required": ["source"]
+          },
+          "then": { "required": ["speaker_id"] }
+        }
+      ]
+    }
+  }
+}

@@ -15,6 +15,9 @@ reports/
 vendor/fonts/
 vendor/wildcards/
 
+# 模型權重（sherpa／ComfyUI；檔案太大，不進 git）
+models/
+
 # Python
 __pycache__/
 *.pyc

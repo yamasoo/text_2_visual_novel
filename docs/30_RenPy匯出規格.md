@@ -11,16 +11,17 @@
 | D1 | 純閱讀：沒有選項、旗標、分支。遇到 `choice` 行直接報錯（v1 不支援）。 | 設計決策 |
 | D2 | **台詞外部化＝劇本一律由 scene JSON 生成，不手改 .rpy**；台詞以繁中（`zh-TW`）寫在生成的 .rpy 裡，之後加語言用 Ren'Py 內建 `translate` 流程。不自建翻譯 id。 | 內建流程最穩、不需要引擎就能先寫出來 |
 | D3 | 所有 Ren'Py 看得到的名稱（label、角色變數、圖片、檔名）只用 `[a-z0-9_]`；中文只在字串值。 | 設計決策 |
-| D4 | 沒有語音；音訊只有 BGM 與環境音（有檔才播）。 | 設計決策 |
+| D4 | 語音是**可選**的：有 `voice/VoiceMap.json` 且音檔存在才在對白前加 `voice` 語句；沒有時行為與舊版相同（純 BGM／環境音）。 | docs/33 |
 | D5 | 專案用 **Ren'Py 啟動器建立的新專案** 當底（要它的 `gui.rpy`、`screens.rpy`）；匯出器只寫 `game/` 底下我們自己的檔案，並覆蓋範本的 `script.rpy`。 | 沒有 SDK 無法自產完整 GUI；覆蓋範圍小而明確 |
 | D6 | 缺的素材一律由「佔位素材產生器」補成純色圖；真素材放進 `works/<book>/assets/` 後重新匯出即可取代。 | 沒美術也能完整玩過 |
 | D7 | 字型由使用者提供（OFL 授權的繁中字型，如思源宋體）；匯出器複製成 `game/fonts/vn_font.<ext>` 並設定 GUI 字型；可先用字型 subset 工具縮小。 | Ren'Py 預設字型沒有中文 |
 | D8 | `weather` 在 v1 不演出（沒有素材）；只用 `time_of_day` 選背景。 | 範圍控制 |
+| D9 | line_id 由 scene graph 的行號決定（`<scene_id>_l<3 位>`）；匯出器只複製 VoiceMap 引用的音檔，孤兒檔不進遊戲。 | docs/33 §3.1 |
 
 ## 2. 命令列
 
 ```
-python -m t2vn.export_renpy --book sample_book --chapters 1-5 --project <Ren'Py 專案資料夾> [--font <字型檔>] [--no-captions] [--clean]
+python -m t2vn.export_renpy --book sample_book --chapters 1-5 --project <Ren'Py 專案資料夾> [--font <字型檔>] [--no-captions] [--no-voice] [--clean]
 ```
 
 - `--project`：用 Ren'Py 啟動器「新建專案」得到的資料夾（內有 `game/`）。沒給就用 `works/<book>/build/renpy/`（獨立模式，沒有 GUI 範本，只用來測試與預覽）。
@@ -43,7 +44,8 @@ python -m t2vn.export_renpy --book sample_book --chapters 1-5 --project <Ren'Py 
 └─ images/ audio/          # 真素材（從 works/<book>/assets 複製）；佔位素材由 placeholders 工具補
    ├─ bg/<asset_id>.png
    ├─ sprite/<char_id>_<expr>.png
-   └─ bgm/<asset_id>.ogg   ambience/<asset_id>.ogg
+   ├─ bgm/<asset_id>.ogg   ambience/<asset_id>.ogg
+   └─ voice/<chapter>/<speaker>_<line_id>.ogg
 ```
 
 ## 4. 命名
@@ -69,7 +71,7 @@ python -m t2vn.export_renpy --book sample_book --chapters 1-5 --project <Ren'Py 
 | `bgm` 與上一場不同 | `play music "audio/bgm/<id>.ogg" fadein 1.0`（有檔才寫，否則留註解）；與上一場相同不重播；`bgm: null` 且上一場有 → `stop music fadeout 1.0` |
 | `ambience` | 有檔才寫 `play ambience "..."`；沒檔略過 |
 | `narration` | `"text"` |
-| `dialogue` | `c_<speaker> "text"`；`expr` 與目前顯示的不同就先 `show <speaker> <expr>`（沿用原位置）。`speaker: player` → `c_player "text"` |
+| `dialogue` | 有配音時先 `voice "audio/voice/<chapter>/<speaker>_<line_id>.ogg"`（line_id = `<scene_id>_l<3 位行號>`），再 `c_<speaker> "text"`；`expr` 與目前顯示的不同就先 `show <speaker> <expr>`（沿用原位置）。`speaker: player` → `c_player "text"` |
 | `direction` | `shake`→`with vpunch`；`flash`→`with vn_flash`；`fade_out`→`scene black` ＋ `with fade`；`fade_in`→`with fade`；`none`→略過 |
 | 場結尾 | `next` 有值 → `jump <next>`；`next` 為 null → 下一章的 `chNNN`；沒有下一章 → `jump vn_end` |
 
@@ -91,6 +93,7 @@ label ch001_sc01:
     play music "audio/bgm/bgm_a.ogg" fadein 1.0
     "天亮了，工坊裡很安靜。"  # p1
     show lao_zhang smile
+    voice "audio/voice/ch001/lao_zhang_ch001_sc01_l002.ogg"
     c_lao_zhang "走吧。"  # p2
     jump ch001_sc02
 ```
@@ -115,6 +118,10 @@ label ch001_sc01:
   ],
   "audio": [
     {"asset_id": "bgm_a", "kind": "bgm", "file": "audio/bgm/bgm_a.ogg", "present": false}
+  ],
+  "voices": [
+    {"line_id": "ch001_sc01_l002", "speaker": "lao_zhang",
+     "file": "audio/voice/ch001/lao_zhang_ch001_sc01_l002.ogg", "present": true}
   ],
   "font": {"file": "fonts/vn_font.ttf", "present": true}
 }
@@ -141,7 +148,8 @@ label ch001_sc01:
 ## 10. 已知限制（v1）
 
 - 沒有 Ren'Py SDK 的環境無法實際執行；本專案的自動測試只檢查語法子集（`renpy_preflight`），**語意以使用者的 Lint 為準**。
-- 不支援選項、旗標、語音、天氣、CG、畫廊、多語言（只留 `translate` 路）。
+- 不支援選項、旗標、天氣、CG、畫廊、多語言（只留 `translate` 路）。
+- 語音只支援「一句一個檔案」的預生成模式；沒有即時 TTS、沒有情緒自動判斷。
 
 ## 11. 實作補充（2026-11-01，與上文有出入者以此為準）
 
@@ -153,4 +161,7 @@ label ch001_sc01:
 - 不在 cast.json 的說話者：角色名用 id 並警告；說話者不在場上時不會為了換表情而叫出立繪。
 - 字型以 `style default / gui_text / say_label / say_dialogue / input / button_text / label_text` 設定（未在真實 GUI 範本驗證）。
 - 全形空白（U+3000）保留；換行與 Tab 轉成一般空白。
+- 語音（2026-11-03）：`voice/VoiceMap.json` 有該 line_id 且 `assets/voice/...` 存在時，對白前插入
+  `voice "audio/voice/<chapter>/<speaker>_<line_id>.ogg"`；只複製被引用的音檔，孤兒檔不進遊戲。
+  `voices` 清單在 `vn_export.json`；`--no-voice` 可完全關閉。
 

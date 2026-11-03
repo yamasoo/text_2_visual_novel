@@ -30,3 +30,13 @@ def test_every_page_file_registers_itself():
     for path in sorted(UI.glob("page_*.js")):
         name = path.stem.removeprefix("page_")
         assert re.search(rf"PAGES\.{name}\s*=", path.read_text(encoding="utf-8")), path.name
+
+
+def test_voice_page_hides_moss_backend():
+    text = (UI / "page_voice.js").read_text(encoding="utf-8")
+    assert "MOSS" not in text and "voice_design_prompt" not in text
+
+
+def test_folder_picker_spreads_directory_nodes():
+    text = (UI / "app.js").read_text(encoding="utf-8")
+    assert "...data.dirs.map(" in text and "...data.files.map(" in text

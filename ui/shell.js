@@ -57,7 +57,7 @@ const Shell = (() => {
     return names.get(id);
   }
   const BOOK_PAGES = [
-    ["", "章節"], ["cast", "角色表"], ["overview", "總覽"], ["bible", "設定集"], ["assets", "素材"], ["audio", "音樂"], ["export", "輸出"], ["jobs", "任務紀錄"],
+    ["", "章節"], ["cast", "角色表"], ["overview", "總覽"], ["bible", "設定集"], ["assets", "素材"], ["audio", "音樂"], ["voice", "語音"], ["export", "輸出"], ["jobs", "任務紀錄"],
   ];
   async function updateNav() {
     const parts = (location.hash || "#/").replace(/^#\/?/, "").split("/").filter(Boolean);

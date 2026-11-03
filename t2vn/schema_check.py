@@ -29,6 +29,8 @@ SCHEMA_FILES = {
     "chapter": "chapter.schema.json",
     "chapter_index": "chapter_index.schema.json",
     "outline": "outline.schema.json",
+    "cast_voice": "cast_voice.schema.json",
+    "voice_map": "voice_map.schema.json",
 }
 
 PLAYER_ID = "player"
@@ -79,6 +81,10 @@ def guess_kind(path: str | Path) -> str | None:
         return "cast"
     if p.name == "manifest.json":
         return "manifest"
+    if p.name == "cast_voice.json":
+        return "cast_voice"
+    if p.name == "VoiceMap.json":
+        return "voice_map"
     if p.parent.name == "scenes" and p.suffix == ".json":
         return "scene"
     if p.parent.name == "outlines" and p.suffix == ".json":

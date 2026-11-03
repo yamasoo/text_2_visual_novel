@@ -27,6 +27,7 @@ from .errors import T2vnError
 from .errors import JobStopped
 from .extract import extract_book
 from . import art_cards, art_cards_studio, art_gen, art_studio, audio_gen, bible, candidate_files, export_studio, history, jobrecords, overview, style_edit
+from . import sherpa_tts, voice_gen, voice_lines
 from .chunked import chunk_chars_for
 from .streambuf import StreamBuffer
 from .llm import LlmError, LlmFn, RunHooks, key_status, make_executor
@@ -41,6 +42,11 @@ JOB_KINDS = ("annotate", "extract")
 ART_JOB_KIND = "art"
 JOB_RECORDS_KEEP = 50
 STYLE_REL = Path(bible.STYLE_FILE)
+
+
+def tts_executor(doc: dict[str, Any] | None) -> str:
+    """TTS 任務面板顯示的執行者：sherpa-onnx 不經過 ComfyUI。"""
+    return "sherpa-onnx" if (doc or {}).get("engine") == "sherpa-onnx" else "ComfyUI"
 
 
 class Job:
@@ -179,7 +185,9 @@ class Context:
 
 def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, config_path: Path | None = None,
                port: int | None = None, comfy_factory: Callable[[], Any] | None = None,
-               audio_backend_factory: Callable[[], Any] | None = None, audio_runner: Callable[[list[str]], tuple[int, str]] | None = None, wildcard_dir: Path | None = None):
+               audio_backend_factory: Callable[[], Any] | None = None, audio_runner: Callable[[list[str]], tuple[int, str]] | None = None,
+               tts_backend_factory: Callable[[], Any] | None = None, tts_runner: Callable[[list[str]], tuple[int, str]] | None = None,
+               wildcard_dir: Path | None = None):
     ctx = Context(config, config_path)
     wild_dir = Path(wildcard_dir) if wildcard_dir is not None else REPO_ROOT / "vendor" / "wildcards"
     jobs = Jobs()
@@ -770,6 +778,162 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     @app.post("/api/books/{book_id}/art/audio/scan")
     def audio_scan_route(book_id: str):
         return audio_gen.scan(ctx.config, art_work(book_id))
+
+    # ---- 語音（MOSS-TTS：聲線設定、逐句生成、VoiceMap）
+    def tts_cast_doc(work: Path) -> dict[str, Any] | None:
+        path = work / "cast.json"
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def tts_chapters(work: Path, body: dict[str, Any]) -> list[int]:
+        chosen = body.get("chapters")
+        if chosen:
+            return sorted({int(x) for x in chosen})
+        return sorted({voice_lines.chapter_number(str(doc.get("chapter_id") or ""))
+                       for doc in voice_lines.load_scene_docs(work)})
+
+    def start_tts(book_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        work = art_work(book_id)
+        chapters = tts_chapters(work, body)
+        if not chapters:
+            raise StudioError("這本書還沒有 scene graph，先標註章節")
+        doc = voice_lines.load_cast_voice(work)
+        if doc is None:
+            raise StudioError("還沒有 voice/cast_voice.json，先替角色設定聲線")
+        errors = voice_lines.validate_cast_voice(doc, work, tts_cast_doc(work))
+        if errors:
+            raise StudioError("cast_voice.json 有問題：\n" + "\n".join(errors))
+        only = [str(x) for x in body["only"]] if body.get("only") else None
+        regenerate = bool(body.get("regenerate"))
+        design_only = bool(body.get("design_only"))
+        config_now = ctx.config
+        backend = tts_backend_factory() if tts_backend_factory else voice_gen.VendorTtsBackend(config_now.comfyui_base_url)
+        job = Job(book_id, "tts", chapters, tts_executor(doc))
+
+        def run(j: Job) -> None:
+            def progress(event: dict[str, Any]) -> None:
+                with j.lock:
+                    update = {"phase": "streaming", "event": event.get("event"), "index": event.get("index"),
+                              "total": event.get("total"), "line_id": event.get("line_id"),
+                              "speaker": event.get("speaker"), "char_id": event.get("char_id")}
+                    j.current.update({k: v for k, v in update.items() if v is not None})
+                    line_id = event.get("line_id")
+                    if line_id:
+                        chapter = int(voice_lines.chapter_of(line_id)[2:])
+                        if chapter in j.items:
+                            j.items[chapter]["note"] = line_id
+                    if event.get("event") == "voice":
+                        chapter = int(voice_lines.chapter_of(str(event["line_id"]))[2:])
+                        if chapter in j.items:
+                            j.items[chapter]["status"] = "running"
+            report = voice_gen.generate(
+                config_now, work, backend, chapters=chapters, only=only, regenerate=regenerate,
+                include_narration=bool(body.get("include_narration")), design_only=design_only,
+                should_stop=lambda: j.stop_requested, progress=progress,
+                runner=tts_runner or voice_gen.run_ffmpeg)
+            for line_id, reason in report.failed.items():
+                j.log.append(f"failed: {line_id}: {reason}")
+            for chapter in j.chapters:
+                prefix = f"ch{chapter:03d}_"
+                j.items[chapter]["status"] = "error" if any(x.startswith(prefix) for x in report.failed) else "done"
+            j.summary = {"generated": report.generated, "skipped": report.skipped, "failed": report.failed,
+                         "designed": report.designed, "unvoiced": report.unvoiced, "stopped": report.stopped}
+            if report.stopped:
+                j.stop_requested = True
+
+        def save_record(j: Job) -> None:
+            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
+            jobrecords.save_record(work, j.record())
+            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
+
+        return jobs.start(job, run, save_record).public()
+
+    @app.get("/api/books/{book_id}/tts")
+    def tts_overview(book_id: str):
+        work = art_work(book_id)
+        return voice_gen.overview(work, tts_cast_doc(work))
+
+    @app.get("/api/books/{book_id}/tts/cast")
+    def tts_get_cast(book_id: str):
+        work = art_work(book_id)
+        doc = voice_lines.load_cast_voice(work)
+        if doc is None:
+            doc = {"schema_version": voice_lines.SCHEMA_VERSION, "book_id": book_id,
+                   "engine": voice_lines.DEFAULT_ENGINE, "characters": {}}
+            return {"exists": False, "cast_voice": doc, "path": None}
+        return {"exists": True, "cast_voice": doc,
+                "path": voice_lines.cast_voice_path(work).relative_to(work).as_posix()}
+
+    @app.get("/api/books/{book_id}/tts/models")
+    def tts_models(book_id: str):
+        work = art_work(book_id)
+        doc = voice_lines.load_cast_voice(work) or {}
+        return {"models": sherpa_tts.list_models(),
+                "current": doc.get("sherpa_model") or "",
+                "root": "models/sherpa"}
+
+    @app.get("/api/books/{book_id}/tts/speakers")
+    def tts_speakers(book_id: str, model: str = ""):
+        work = art_work(book_id)
+        doc = voice_lines.load_cast_voice(work) or {}
+        return sherpa_tts.speaker_catalog(model or doc.get("sherpa_model"))
+
+    @app.put("/api/books/{book_id}/tts/cast")
+    async def tts_put_cast(book_id: str, request: Request):
+        work = art_work(book_id)
+        body = await request.json()
+        doc = body.get("cast_voice") if isinstance(body.get("cast_voice"), dict) else body
+        errors = voice_lines.validate_cast_voice(doc, work, tts_cast_doc(work))
+        if errors:
+            raise StudioError("cast_voice.json 有問題：\n" + "\n".join(errors))
+        path = voice_lines.save_cast_voice(ctx.config, work, doc)
+        return {"ok": True, "path": path.relative_to(work).as_posix()}
+
+    @app.get("/api/books/{book_id}/tts/file")
+    def tts_file(book_id: str, path: str):
+        return FileResponse(voice_gen.audio_file(art_work(book_id), path))
+
+    @app.post("/api/books/{book_id}/tts/sample")
+    async def tts_sample(book_id: str, request: Request):
+        """用目前模型即時生成一句範例（不寫 VoiceMap），回傳 data URL 供試聽。"""
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        work = art_work(book_id)
+        doc = voice_lines.load_cast_voice(work) or {}
+        text = str((body or {}).get("text") or "").strip()
+        if not text:
+            raise StudioError("text is required")
+        try:
+            speaker_id = int((body or {}).get("speaker_id") or 0)
+            speed = float((body or {}).get("speed") or 1.0)
+            model = str((body or {}).get("model") or doc.get("sherpa_model") or "").strip() or None
+            wav = sherpa_tts.SherpaTts(model).wav_bytes(text, speaker_id=speaker_id, speed=speed)
+        except (TypeError, ValueError, sherpa_tts.SherpaTtsError) as exc:
+            raise StudioError(f"範例語音失敗：{exc}") from exc
+        return {"audio": "data:audio/wav;base64," + base64.b64encode(wav).decode("ascii")}
+
+    @app.post("/api/books/{book_id}/tts/generate")
+    async def tts_generate(book_id: str, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        return start_tts(book_id, body or {})
+
+    @app.post("/api/books/{book_id}/tts/design")
+    async def tts_design(book_id: str, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        return start_tts(book_id, {**(body or {}), "design_only": True})
+
+    @app.post("/tts/generate")
+    async def tts_generate_compat(request: Request):
+        """任務卡指定的端點；book_id 放在 body。"""
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        book_id = str((body or {}).get("book_id") or "").strip()
+        if not book_id:
+            raise StudioError("book_id is required")
+        payload = {k: v for k, v in body.items() if k != "book_id"}
+        return start_tts(book_id, payload)
 
     # ---- 輸出：標題素材、匯出、自動驗收
     @app.get("/api/books/{book_id}/export")

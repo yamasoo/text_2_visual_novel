@@ -19,7 +19,7 @@
 | **標註** | 去泡杯茶 | 把每章變成場景與台詞：分場、旁白、說話者、表情、演出效果 |
 | **校對** | 左邊原文、右邊劇本，逐句修 | 標出推斷的說話者（`?`）、漏掉的敘述、不逐字的改寫 |
 | **美術** | 在「素材」頁挑風格、按生成 | 用 ComfyUI 出生立繪與背景，自動去背、對齊、命名 |
-| **聲音** | 選氣氛、按生成 | 產生 BGM 與環境音，管理音訊素材 |
+| **聲音** | 選氣氛、按生成 | 產生 BGM 與環境音；可選 **sherpa-onnx 固定聲線**逐句配音（CPU、不需 ComfyUI），輸出 OGG 與 `VoiceMap.json` |
 | **輸出** | 填一次 Ren'Py SDK 路徑 | 產生可執行的 Ren'Py 專案，並檢查缺素材、字型缺字 |
 | **驗收** | 按「開始驗收」 | 打包成 QA 包，用截圖驗證畫面與流程 |
 
@@ -38,20 +38,49 @@
 | 項目 | 說明 |
 |---|---|
 | Windows 10／11 | 目前只在 Windows 實測過 |
-| Python 3.10 以上 | 安裝時記得勾「Add Python to PATH」 |
+| Python 3.10 以上 | 先確認電腦已安裝；不需要重裝，也不要覆蓋既有 Python |
 | 小說文字 | TXT／Markdown／DOCX／EPUB；程式**只讀不寫**，不會動到你的原稿 |
-| 一個 LLM | DeepSeek API 金鑰，或本機跑的 llama.cpp |
+| 一個 LLM | [DeepSeek API 金鑰](https://platform.deepseek.com/)，或本機跑的 llama.cpp |
 
 **選配（沒有也能用，只是少幾步）**
 
 | 項目 | 什麼時候需要 |
 |---|---|
-| ComfyUI ＋ 顯示卡 | 想自動生立繪／背景時 |
-| ffmpeg | 想處理音樂音效時 |
-| Ren'Py SDK 8.x | 想輸出成遊戲時 |
+| ComfyUI ＋ 顯示卡 | 想自動生立繪／背景、BGM 時 |
+| `sherpa-onnx`（`requirements-tts.txt`）＋約 116 MB 中文模型 | 想用 sherpa-onnx 固定聲線配音時（CPU，不需要 ComfyUI） |
+| ffmpeg | 想處理音樂音效、或把語音轉 OGG 時 |
+| [Ren'Py SDK 8.x](https://www.renpy.org/latest.html) | 想輸出成遊戲時 |
 
 **資源量級**：一本 20 萬字的小說，作品資料夾大約 1–3 GB（多數是圖片）。
 顯示卡用於出圖，沒有也可以先做劇本、之後再補圖。
+
+### 先檢查環境（已安裝可跳過）
+
+先開 PowerShell 確認版本；**不要為了這個專案重裝 Python**，以免影響其他環境：
+
+```powershell
+python --version
+git --version
+ffmpeg -version
+```
+
+如果缺少：
+
+- Python 3.10+：<https://www.python.org/downloads/windows/>（安裝時勾「Add Python to PATH」；已有 Python 就跳過）
+- Git：<https://git-scm.com/download/win>
+- ffmpeg：<https://ffmpeg.org/download.html>
+- Ren'Py SDK 8.x：<https://www.renpy.org/latest.html>
+
+`start_studio.bat` 只會在專案內建立 `venv\`，不會把套件裝進你的全域 Python。
+
+**語音模型不在 GitHub**，第一次使用請跑：
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements-tts.txt
+.\venv\Scripts\python.exe tools\sherpa_get_model.py vits-zh-hf-fanchen-C
+```
+
+完整步驟見 [36_語音快速開始.md](docs/36_語音快速開始.md)。
 
 ## 怎麼開始
 
@@ -64,7 +93,10 @@ cd text_2_visual_novel
 第一次執行會自動建虛擬環境、裝好套件、產生 `config.yaml`，然後打開
 <http://127.0.0.1:7866/>。
 
-**唯一要手動改的**是 `config.yaml` 裡的 `book_library.path`——指向你放小說的那個資料夾。
+打開後到 **設定** 頁，用「作品存放位置」和「書庫位置」的 **瀏覽…** 直接選資料夾即可，
+**不需要手動編輯 `config.yaml`**。
+
+只有在設定頁無法開啟時，才需要手動檢查 `config.yaml` 的 `book_library.path`。
 
 接著在網頁上：
 
@@ -73,7 +105,8 @@ cd text_2_visual_novel
 3. 勾章節 → **AI 標註**（背景執行，可以看進度和花費）
 4. **章節** → 打開校對，把 `?` 和紅色提示修掉
 5. 想先看看 → **建立可玩原型**（HTML，不用 Ren'Py）
-6. 要正式版 → 設定 Ren'Py 路徑 → **匯出**
+6. 想配音 → 先照 [語音快速開始](docs/36_語音快速開始.md) 下載 sherpa 模型 → **語音**頁填聲線 → 生成 → 重新匯出
+7. 要正式版 → 設定 Ren'Py 路徑 → **匯出**
 
 ## 費用大概多少
 
@@ -105,6 +138,7 @@ cd text_2_visual_novel
 - `works/` — 小說原文、標註結果、圖片、遊戲建置產物
 - `config.yaml` — 你自己的本機路徑設定
 - `vendor/fonts/`、`vendor/wildcards/` — 第三方素材，需要時自行下載
+- `models/` — sherpa-onnx 與 ComfyUI 的模型權重，檔案太大，請照文件下載
 
 ## 想更深入了解
 
@@ -115,6 +149,8 @@ cd text_2_visual_novel
 | [docs/30_RenPy匯出規格.md](docs/30_RenPy匯出規格.md) | Ren'Py 專案結構與命名 |
 | [docs/31_美術管線規格.md](docs/31_美術管線規格.md) | 立繪、背景與出圖流程 |
 | [docs/32_外型卡規格.md](docs/32_外型卡規格.md) | 角色外型與 wildcard 卡池 |
+| [docs/34_sherpa模型清單.md](docs/34_sherpa模型清單.md) | sherpa-onnx 中文／粵語模型與下載 |
+| [docs/36_語音快速開始.md](docs/36_語音快速開始.md) | 從安裝、下載模型到生成語音的完整指令 |
 
 想跑測試或參與開發：`pip install -r requirements-dev.txt` 後執行 `pytest`。
 

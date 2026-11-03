@@ -1,0 +1,3 @@
+# 選配：sherpa-onnx 本機 CPU TTS（語音模組的另一個 backend，不需要 ComfyUI）
+# 安裝：.\venv\Scripts\python.exe -m pip install -r requirements-tts.txt
+sherpa-onnx>=2.0

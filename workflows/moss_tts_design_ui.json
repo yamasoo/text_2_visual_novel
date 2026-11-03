@@ -1,0 +1,97 @@
+{
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MossTTSModelLoader",
+      "pos": [80, 120],
+      "size": [340, 130],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        { "name": "model_variant", "type": "COMBO", "widget": { "name": "model_variant" }, "link": null },
+        { "name": "local_model_path", "type": "STRING", "widget": { "name": "local_model_path" }, "link": null },
+        { "name": "codec_local_path", "type": "STRING", "widget": { "name": "codec_local_path" }, "link": null }
+      ],
+      "outputs": [
+        { "name": "MOSS_TTS_PIPE", "type": "MOSS_TTS_PIPE", "links": [1], "slot_index": 0 }
+      ],
+      "properties": { "Node name for S&R": "MossTTSModelLoader" },
+      "widgets_values": ["MOSS-VoiceGenerator", "", ""],
+      "widgets_values_named": { "model_variant": "MOSS-VoiceGenerator", "local_model_path": "", "codec_local_path": "" }
+    },
+    {
+      "id": 2,
+      "type": "MossTTSVoiceDesign",
+      "pos": [480, 100],
+      "size": [440, 480],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        { "name": "moss_pipe", "type": "MOSS_TTS_PIPE", "link": 1 },
+        { "name": "language", "type": "COMBO", "widget": { "name": "language" }, "link": null },
+        { "name": "text", "type": "STRING", "widget": { "name": "text" }, "link": null },
+        { "name": "instruction", "type": "STRING", "widget": { "name": "instruction" }, "link": null },
+        { "name": "seed", "type": "INT", "widget": { "name": "seed" }, "link": null },
+        { "name": "temperature", "type": "FLOAT", "widget": { "name": "temperature" }, "link": null },
+        { "name": "top_p", "type": "FLOAT", "widget": { "name": "top_p" }, "link": null },
+        { "name": "top_k", "type": "INT", "widget": { "name": "top_k" }, "link": null },
+        { "name": "repetition_penalty", "type": "FLOAT", "widget": { "name": "repetition_penalty" }, "link": null },
+        { "name": "max_new_tokens", "type": "INT", "widget": { "name": "max_new_tokens" }, "link": null },
+        { "name": "head_handle", "type": "FLOAT", "widget": { "name": "head_handle" }, "link": null },
+        { "name": "tail_handle", "type": "FLOAT", "widget": { "name": "tail_handle" }, "link": null }
+      ],
+      "outputs": [
+        { "name": "audio", "type": "AUDIO", "links": [2], "slot_index": 0 }
+      ],
+      "properties": { "Node name for S&R": "MossTTSVoiceDesign" },
+      "widgets_values": ["zh", "這是一段固定角色音色的參考錄音。", "低沉、緩慢的中年男性，說中文。", 9173, "fixed", 1.5, 0.6, 50, 1.1, 128, 0.05, 0.05],
+      "widgets_values_named": {
+        "language": "zh",
+        "text": "這是一段固定角色音色的參考錄音。",
+        "instruction": "低沉、緩慢的中年男性，說中文。",
+        "seed": 9173,
+        "control_after_generate": "fixed",
+        "temperature": 1.5,
+        "top_p": 0.6,
+        "top_k": 50,
+        "repetition_penalty": 1.1,
+        "max_new_tokens": 128,
+        "head_handle": 0.05,
+        "tail_handle": 0.05
+      }
+    },
+    {
+      "id": 3,
+      "type": "SaveAudioAdvanced",
+      "pos": [980, 100],
+      "size": [300, 160],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "audio", "type": "AUDIO", "link": 2 },
+        { "name": "filename_prefix", "type": "STRING", "widget": { "name": "filename_prefix" }, "link": null },
+        { "name": "format", "type": "COMFY_DYNAMICCOMBO_V3", "widget": { "name": "format" }, "link": null },
+        { "name": "audioUI", "type": "AUDIO_UI", "widget": { "name": "audioUI" }, "link": null }
+      ],
+      "outputs": [
+        { "name": "audio", "type": "AUDIO", "links": null }
+      ],
+      "properties": { "Node name for S&R": "SaveAudioAdvanced" },
+      "widgets_values": ["voice/manual_design", "flac"],
+      "widgets_values_named": { "filename_prefix": "voice/manual_design", "format": "flac" }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MOSS_TTS_PIPE"],
+    [2, 2, 0, 3, 0, "AUDIO"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": { "ds": { "scale": 0.8, "offset": [0, 0] } },
+  "version": 0.4
+}
