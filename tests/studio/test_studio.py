@@ -240,11 +240,12 @@ def test_http_refuses_non_local_host_and_origin(tmp_path):
 
 
 def wait_job(http, job_id):
+    """等任務結束，回傳 fekit 的 patch。"""
     import time
     for _ in range(100):
-        job = http.get(f"/api/jobs/{job_id}").json()
-        if job["status"] != "running":
-            return job
+        patch = http.get(f"/api/fe-jobs/{job_id}?since=0").json()
+        if patch["status"] != "running":
+            return patch
         time.sleep(0.05)
     raise AssertionError("job did not finish")
 
@@ -265,8 +266,8 @@ def test_http_annotate_job_then_edit_and_prototype(client):
     page = http.get("/api/books/demo/prototype/index.html")
     assert page.status_code == 200 and "<html" in page.text
     # 第二個任務不能和仍在執行的任務重疊；跑完之後可以再開
-    active = http.get("/api/jobs/active").json()["job"]
-    assert active["status"] == "done" and active["items"][0]["status"] == "done" and active["items"][0]["note"] == "1 scenes"
+    active = http.get("/api/books/demo/jobs/active").json()["job"]
+    assert active["status"] == "done" and active["items"][0]["state"] == "done" and active["items"][0]["note"] == "1 scenes"
 
 
 def test_http_job_requires_llm_key(tmp_path):
@@ -296,8 +297,8 @@ def test_job_reports_progress_and_streams(tmp_path):
     http = TestClient(create_app(config, llm_factory=lambda: ReplayLLM([json.dumps(sample_ops(None), ensure_ascii=False)])),
                       base_url="http://127.0.0.1:7866")
     job = wait_job(http, http.post("/api/books/demo/jobs", json={"kind": "annotate", "chapters": [1]}).json()["id"])
-    assert job["current"]["phase"] == "finished" and job["elapsed"] >= 0
-    assert job["current"]["chars"] > 0  # 串流字數有回報
+    assert job["status"] == "done" and job["ended_at"] >= job["started_at"]
+    assert sum(len(part.get("text", "")) for part in job["stream"]) > 0  # 串流有回報
 
 
 def test_job_can_be_stopped_mid_call(tmp_path):
@@ -322,9 +323,9 @@ def test_job_can_be_stopped_mid_call(tmp_path):
     http = TestClient(create_app(config, llm_factory=lambda: slow), base_url="http://127.0.0.1:7866")
     job_id = http.post("/api/books/demo/jobs", json={"kind": "annotate", "chapters": [1, 2]}).json()["id"]
     assert started.wait(2)
-    http.post(f"/api/jobs/{job_id}/stop")
+    http.post(f"/api/fe-jobs/{job_id}/stop")
     job = wait_job(http, job_id)
-    assert job["status"] == "stopped" and job["items"][0]["status"] == "stopped" and job["items"][1]["status"] == "pending"
+    assert job["status"] == "stopped" and job["items"][0]["state"] == "stopped" and job["items"][1]["state"] == "pending"
 
 
 def test_settings_roundtrip_and_validation(tmp_path):

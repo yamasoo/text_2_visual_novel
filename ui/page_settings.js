@@ -1,9 +1,9 @@
 /* 設定頁：AI 執行者（DeepSeek、本機 llama.cpp、自訂）、預設執行者、位置、其他。#/settings */
 "use strict";
 
-PAGES.settings = async function () {
-  crumbs([{ label: "書架", href: "#/" }, { label: "設定" }]);
-  const st = await api("/api/settings");
+FE.PAGES.settings = async (ctx) => {
+  ctx.crumbs([{ label: "書架", href: "#/" }, { label: "設定" }]);
+  const st = await FE.api("/api/settings", { signal: ctx.signal });
   const ex = st.executors, paths = st.paths;
   const THINK = { off: "關閉（最快最省，預設）", low: "低", medium: "中", high: "高", max: "最高" };
   const form = { default: ex.default, providers: {}, remove: [], paths: { works_dir: paths.works_dir_is_default ? "" : paths.works_dir, book_library: paths.book_library },
@@ -19,12 +19,12 @@ PAGES.settings = async function () {
     const keyInput = h("input", { type: "password", placeholder: p.key.needed ? "貼上 API 金鑰" : "（本機通常不需要）", autocomplete: "off", style: "width:280px" });
     const saveKey = async () => {
       if (!keyInput.value.trim()) return toast("先貼上金鑰", "bad");
-      try { const r = await api("/api/settings/key", { body: { provider: p.id, key: keyInput.value.trim() } }); keyInput.value = ""; toast("金鑰已存到 " + r.saved_to); PAGES.settings(); refreshChip(); } catch (error) { fail(error); }
+      try { const r = await FE.api("/api/settings/key", { body: { provider: p.id, key: keyInput.value.trim() } }); keyInput.value = ""; toast("金鑰已存到 " + r.saved_to); FE.route(); refreshChip(); } catch (error) { fail(error); }
     };
     const test = async () => {
       testOut.style.color = ""; testOut.textContent = "測試中…（用已儲存的設定；改了欄位請先按最下面的「儲存設定」）";
       try {
-        const r = await api("/api/settings/test", { body: { executor: p.id } });
+        const r = await FE.api("/api/settings/test", { body: { executor: p.id } });
         testOut.style.color = r.ok ? "var(--ok)" : "var(--bad)";
         testOut.replaceChildren(document.createTextNode((r.ok ? "✔ " : "✖ ") + r.message + (r.tokens ? `（${r.model}，${r.tokens} tokens）` : "")),
           ...(r.models && r.models.length ? [h("div", { class: "row", style: "margin-top:4px" }, h("span", { class: "muted" }, "伺服器上的模型："), r.models.map((m) => h("button", { class: "sm", onclick: () => { modelInput.value = m; edit(p.id, "model", m); } }, m)))] : []));
@@ -48,7 +48,7 @@ PAGES.settings = async function () {
           field("要求 JSON 輸出", h("input", { type: "checkbox", checked: p.json_mode, onchange: (e) => edit(p.id, "json_mode", e.target.checked) }), "不支援的伺服器請關掉。")),
         field("API 金鑰", h("div", { class: "row" }, keyInput, h("button", { onclick: saveKey }, "儲存金鑰"), p.key.found ? h("span", { class: "small muted" }, "目前：" + p.key.where) : ""), "只存在這台電腦的系統 keyring，不寫進 config.yaml，也不會顯示在畫面上。"),
         h("div", { class: "row" }, h("button", { onclick: test }, "測試連線"),
-          p.builtin ? "" : h("button", { class: "ghost sm", onclick: () => { if (confirm(`刪除自訂供應商 ${p.id}？儲存後生效。`)) { form.remove.push(p.id); toast("已標記刪除，按「儲存設定」生效"); } } }, "刪除此供應商")),
+          p.builtin ? "" : h("button", { class: "ghost sm", onclick: async () => { if (await FE.confirm(`刪除自訂供應商 ${p.id}？儲存後生效。`, { danger: true, ok: "刪除" })) { form.remove.push(p.id); toast("已標記刪除，按「儲存設定」生效"); } } }, "刪除此供應商")),
         testOut));
   }
 
@@ -57,7 +57,7 @@ PAGES.settings = async function () {
   const newUrl = h("input", { placeholder: "http://192.168.1.5:8000/v1", style: "width:260px" });
   const newModel = h("input", { placeholder: "模型名稱（可留空）", style: "width:170px" });
   const addCustom = h("div", { class: "row" }, newId, newUrl, newModel, h("button", { onclick: async () => {
-    try { await api("/api/settings", { method: "PUT", body: { executors: { providers: { [newId.value.trim()]: { base_url: newUrl.value.trim(), model: newModel.value.trim() || undefined, name: newId.value.trim() } } } } }); toast("已新增"); PAGES.settings(); } catch (error) { fail(error); }
+    try { await FE.api("/api/settings", { method: "PUT", body: { executors: { providers: { [newId.value.trim()]: { base_url: newUrl.value.trim(), model: newModel.value.trim() || undefined, name: newId.value.trim() } } } } }); toast("已新增"); FE.route(); } catch (error) { fail(error); }
   } }, "新增自訂供應商"));
 
   const worksInput = h("input", { value: form.paths.works_dir, placeholder: `（預設）${paths.project_root}\\works`, style: "width:min(520px,100%)", oninput: (e) => { form.paths.works_dir = e.target.value.trim(); } });
@@ -65,11 +65,11 @@ PAGES.settings = async function () {
   const save = async () => {
     try {
       const body = { executors: { default: form.default, providers: form.providers, remove: form.remove }, paths: form.paths, comfyui: form.comfyui, server: form.server };
-      const r = await api("/api/settings", { method: "PUT", body });
-      toast(r.restart_required ? "已存檔。埠號要重新啟動工作台才會生效" : "設定已儲存"); refreshChip(); AiPanel.reloadChoices(); PAGES.settings();
+      const r = await FE.api("/api/settings", { method: "PUT", body });
+      toast(r.restart_required ? "已存檔。埠號要重新啟動工作台才會生效" : "設定已儲存"); refreshChip(); Executors.reload(); FE.route();
     } catch (error) { fail(error); }
   };
-  $("#view").replaceChildren(h("h1", {}, "設定"),
+  ctx.view(h("h1", {}, "設定"),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "預設執行者"), h("div", { class: "row" }, defaultSelect, h("span", { class: "small muted" }, "沒特別指定時，標註與抽取用這個。右側 AI 面板可以臨時改用別的。"))),
     h("h2", {}, "AI 執行者"), ...ex.providers.map(providerCard),
     h("div", { class: "card" }, h("div", { class: "small muted" }, "自己的 OpenAI 相容伺服器（vLLM、LM Studio、Ollama 的 /v1 等）"), addCustom),

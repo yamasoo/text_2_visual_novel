@@ -93,8 +93,8 @@ def test_generate_per_character_headshots_and_sprite(tmp_path):
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "sprite": True, "candidates": 1}).json()
     job = wait_job(http, started["id"])
     assert job["status"] == "done", job
-    assert sorted(job["summary"]["generated"]) == ["headshot_lao_zhang_neutral", "headshot_lao_zhang_smile", "sprite_lao_zhang_neutral"]
-    assert not job["summary"]["failed"]
+    assert sorted(job["result"]["generated"]) == ["headshot_lao_zhang_neutral", "headshot_lao_zhang_smile", "sprite_lao_zhang_neutral"]
+    assert not job["result"]["failed"]
     row = _row(http)
     assert [len(a["candidates"]) for a in row["assets"]] == [1, 1, 1]
     shot = row["assets"][0]["candidates"][0]
@@ -113,7 +113,7 @@ def test_generate_only_headshot_when_sprite_not_ticked(tmp_path):
     _ready_card(http)
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "candidates": 2}).json()
     job = wait_job(http, started["id"])
-    assert job["summary"]["generated"] == ["headshot_lao_zhang_neutral"] and len(fake.calls) == 2
+    assert job["result"]["generated"] == ["headshot_lao_zhang_neutral"] and len(fake.calls) == 2
     assert [len(a["candidates"]) for a in _row(http)["assets"] if a["kind"] == "sprite"] == [0]
 
 
@@ -300,4 +300,4 @@ def test_supporting_character_only_gets_neutral_even_if_card_checks_more(tmp_pat
     assert "headshot_lao_zhang_neutral" in ids and "headshot_lao_zhang_smile" not in ids
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "sprite": True, "candidates": 1}).json()
     job = wait_job(http, started["id"])
-    assert sorted(job["summary"]["generated"]) == ["headshot_lao_zhang_neutral", "sprite_lao_zhang_neutral"]
+    assert sorted(job["result"]["generated"]) == ["headshot_lao_zhang_neutral", "sprite_lao_zhang_neutral"]

@@ -9,13 +9,12 @@ import argparse
 import base64
 import json
 import os
+import sys
 import threading
-import time
-import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,19 +23,26 @@ from fastapi.staticfiles import StaticFiles
 from .annotate import annotate_chapter_to_disk
 from .config import Config, load_config
 from .errors import T2vnError
-from .errors import JobStopped
 from .extract import extract_book
 from . import art_cards, art_cards_studio, art_gen, art_studio, audio_gen, bible, candidate_files, export_studio, history, jobrecords, overview, style_edit
 from . import sherpa_tts, voice_gen, voice_lines
 from .chunked import chunk_chars_for
-from .streambuf import StreamBuffer
-from .llm import LlmError, LlmFn, RunHooks, key_status, make_executor
+from .llm import LlmError, LlmFn, key_status, make_executor
 from .settings import apply_settings, check_connection, read_settings, store_key
 from .studio import Studio, StudioError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# fekit 的 Python 輔助是 vendor/fekit/py 裡的複製品；要在 import fekit 之前加進 sys.path。
+sys.path.insert(0, str(REPO_ROOT / "vendor" / "fekit" / "py"))
+
+from fekit import JobRunner, install  # noqa: E402
+
+from .jobs_bridge import FE_JOBS_BASE, Jobs  # noqa: E402
+
 UI_DIR = REPO_ROOT / "ui"
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+FEKIT_DIR = REPO_ROOT / "vendor" / "fekit"
+TEMPLATES = REPO_ROOT / "templates"
+
 ALLOWED_EXTS = {".txt", ".md", ".markdown", ".text", ".docx", ".epub"}
 JOB_KINDS = ("annotate", "extract")
 ART_JOB_KIND = "art"
@@ -47,128 +53,6 @@ STYLE_REL = Path(bible.STYLE_FILE)
 def tts_executor(doc: dict[str, Any] | None) -> str:
     """TTS 任務面板顯示的執行者：sherpa-onnx 不經過 ComfyUI。"""
     return "sherpa-onnx" if (doc or {}).get("engine") == "sherpa-onnx" else "ComfyUI"
-
-
-class Job:
-    """一個背景任務。UI 用 ``public()`` 取得進度：逐章狀態、目前步驟、串流字數、token、紀錄。"""
-
-    def __init__(self, book_id: str, kind: str, chapters: list[int], executor: str = ""):
-        self.id = uuid.uuid4().hex[:10]
-        self.book_id, self.kind, self.chapters = book_id, kind, chapters
-        self.executor = executor  # 這個任務用的 AI 執行者（"供應商" 或 "供應商/模型"）
-        self.status = "running"  # running | done | error | stopped
-        self.log: list[str] = []
-        self.summary: dict[str, Any] = {}
-        self.started = time.time()
-        self.ended: float | None = None
-        self.stop_requested = False
-        self.items = {n: {"no": n, "status": "pending", "note": ""} for n in chapters}
-        self.current: dict[str, Any] = {"chapter": None, "phase": "idle", "round": 0, "chars": 0, "since": time.time()}
-        self.tokens = 0
-        self.stream = StreamBuffer()  # 模型串流輸出（網頁右側 AI 面板用）
-        self.lock = threading.Lock()
-
-    def set_item(self, number: int, status: str, note: str = "") -> None:
-        with self.lock:
-            self.items[number] = {"no": number, "status": status, "note": note}
-            if status == "running":
-                self.current = {"chapter": number, "phase": "starting", "round": 0, "chars": 0, "since": time.time()}
-
-    def event(self, kind: str, info: dict[str, Any]) -> None:
-        """RunHooks.on_event：更新目前步驟。"""
-        with self.lock:
-            cur = self.current
-            if kind == "request":
-                cur.update(phase="waiting", round=info["round"], chars=0, since=time.time())
-                chapter = cur.get("chapter")
-                where = f"第 {chapter} 章" + (f" · 第 {cur['chunk']} 塊" if cur.get("chunk") else "") if chapter else ""
-                self.stream.begin(" · ".join(x for x in (where, f"第 {info['round']} 輪") if x))
-            elif kind == "chunk":
-                cur.update(chunk=f"{info['index']}/{info['total']}", chunk_range=[info["first"], info["last"]])
-            elif kind == "delta":
-                cur.update(phase="streaming", chars=info["chars"])
-                self.stream.add(info.get("text", ""))
-            elif kind == "thinking":
-                cur.update(phase="thinking")
-                self.stream.add(info.get("text", ""), thinking=True)
-            elif kind == "response":
-                self.stream.end()
-                self.tokens += info["usage"].get("prompt_tokens", 0) + info["usage"].get("completion_tokens", 0)
-                cur.update(phase="checking", since=time.time())
-            elif kind == "repair":
-                cur.update(phase="repair", count=info.get("count", 0), since=time.time())
-
-    def hooks(self) -> RunHooks:
-        return RunHooks(should_stop=lambda: self.stop_requested, on_event=self.event)
-
-    def record(self) -> dict[str, Any]:
-        """存成任務紀錄用的完整內容（``jobrecords.save_record``）。"""
-        data = self.public(0)
-        data["started"], data["ended"] = self.started, self.ended
-        data.pop("current", None)
-        return data
-
-    def public(self, since: int = 0, stream_since: int | None = None) -> dict[str, Any]:
-        now = time.time()
-        with self.lock:
-            out = {
-                "id": self.id, "book_id": self.book_id, "kind": self.kind, "chapters": self.chapters, "status": self.status,
-                "executor": self.executor,
-                "items": [self.items[n] for n in self.chapters], "current": dict(self.current),
-                "tokens": self.tokens, "stop_requested": self.stop_requested,
-                "elapsed": round((self.ended or now) - self.started, 1),
-                "log": self.log[since:], "log_total": len(self.log), "summary": self.summary,
-            }
-        if stream_since is not None:
-            out["stream"] = self.stream.read(stream_since)
-        return out
-
-
-class Jobs:
-    """一本書同時只跑一個任務（標註與抽取都會寫同一份 cast.json）。"""
-
-    def __init__(self) -> None:
-        self.items: dict[str, Job] = {}
-        self.lock = threading.Lock()
-
-    def running_for(self, book_id: str) -> Job | None:
-        return next((j for j in self.items.values() if j.book_id == book_id and j.status == "running"), None)
-
-    def latest(self) -> Job | None:
-        """正在跑的任務優先，否則最近結束的。"""
-        running = [j for j in self.items.values() if j.status == "running"]
-        pool = running or list(self.items.values())
-        return max(pool, key=lambda j: j.started) if pool else None
-
-    def start(self, job: Job, target: Callable[[Job], None], on_finish: Callable[[Job], None] | None = None) -> Job:
-        with self.lock:
-            if self.running_for(job.book_id):
-                raise StudioError("another job is still running for this book")
-            self.items[job.id] = job
-
-        def run() -> None:
-            try:
-                target(job)
-                job.status = "stopped" if job.stop_requested else ("error" if job.summary.get("failed") else "done")
-            except JobStopped:
-                job.status = "stopped"
-            except T2vnError as exc:
-                job.log.append(f"error: {exc}")
-                job.status = "error"
-            except Exception as exc:  # noqa: BLE001 — 背景執行緒不能默默死掉
-                job.log.append(f"unexpected error: {type(exc).__name__}: {exc}")
-                job.status = "error"
-            finally:
-                job.ended = time.time()
-                job.current["phase"] = "finished"
-                if on_finish is not None:
-                    try:
-                        on_finish(job)
-                    except Exception as exc:  # noqa: BLE001 — 存不了紀錄不能讓任務狀態壞掉
-                        job.log.append(f"could not save job record: {exc}")
-
-        threading.Thread(target=run, daemon=True).start()
-        return job
 
 
 class Context:
@@ -187,33 +71,38 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
                port: int | None = None, comfy_factory: Callable[[], Any] | None = None,
                audio_backend_factory: Callable[[], Any] | None = None, audio_runner: Callable[[list[str]], tuple[int, str]] | None = None,
                tts_backend_factory: Callable[[], Any] | None = None, tts_runner: Callable[[list[str]], tuple[int, str]] | None = None,
-               wildcard_dir: Path | None = None):
+               wildcard_dir: Path | None = None, token: str | None = None):
     ctx = Context(config, config_path)
     wild_dir = Path(wildcard_dir) if wildcard_dir is not None else REPO_ROOT / "vendor" / "wildcards"
-    jobs = Jobs()
     app = FastAPI(title="text_2_visual_novel studio")
+
+    runner = JobRunner()                       # 同時 1 個任務；滿了回 409（舊的是同書 400）
+    jobs = Jobs(runner)
+    # 本機保護（Host、Origin、X-FE-Token）、錯誤格式、/api/fe-jobs 與 /api/fs/list 端點。
+    fe = install(
+        app, app_name="t2vn", jobs=runner, jobs_base=FE_JOBS_BASE,
+        fs=True,
+        token=token or os.environ.get("T2VN_FE_TOKEN") or None,
+    )
 
     def get_llm(executor: str | None = None) -> LlmFn:
         if llm_factory is not None:
             return llm_factory()
         return make_executor(ctx.config, executor or None)
 
-    # ---- 只收本機連線
-    @app.middleware("http")
-    async def local_only(request: Request, call_next):
-        host = urlsplit("//" + (request.headers.get("host") or "")).hostname
-        if host not in LOCAL_HOSTS:
-            return JSONResponse({"error": "local access only"}, status_code=403)
-        origin = request.headers.get("origin")
-        if request.method not in ("GET", "HEAD") and origin and urlsplit(origin).hostname not in LOCAL_HOSTS:
-            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
-        return await call_next(request)
+    def save_record(work: Path, config_now: Config) -> Callable[[Any], None]:
+        """任務結束時的存檔回呼：寫一份 work/_jobs/<id>.json 並修剪舊的。"""
+        def on_finish(job: Any) -> None:
+            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{job.id}.json")
+            jobrecords.save_record(work, jobs.record(job))
+            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
+        return on_finish
 
     @app.middleware("http")
     async def no_cache_ui(request: Request, call_next):
         """前端檔每次都向伺服器確認有沒有更新，避免改版後瀏覽器還在用舊的 JS。"""
         response = await call_next(request)
-        if request.url.path == "/" or request.url.path.startswith("/ui/"):
+        if request.url.path == "/" or request.url.path.startswith(("/ui/", "/fekit/")):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
@@ -288,10 +177,6 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         body = await request.json()
         return ctx.studio.commit_import(body.get("book_id", ""), body.get("display_name", ""), _payload(body), body.get("opts") or {})
 
-    @app.get("/api/fs/list")
-    def fs_list(path: str = "", dirs_only: bool = False):
-        return list_dir(path, dirs_only)
-
     # ---- 章節、場景、角色、章綱
     @app.get("/api/books/{book_id}/chapters")
     def chapters(book_id: str):
@@ -350,57 +235,35 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         force = bool(body.get("force"))
         config_now = ctx.config
         chunk_chars = chunk_chars_for(config_now, executor)
-        job = Job(book_id, kind, numbers, executor or config_now.llm_default)
         lang = studio.book_json(book_id).get("lang", "zh-TW")
 
-        def run(j: Job) -> None:
-            hooks = j.hooks()
+        def run(j: Any) -> dict[str, Any]:
+            hooks = jobs.hooks(j)
             if kind == "extract":
-                j.summary = extract_book(work, numbers, llm, book_id, lang, force, j.log.append, lambda: j.stop_requested,
-                                         hooks=hooks, on_chapter=j.set_item)
-                return
+                return extract_book(work, numbers, llm, book_id, lang, force, j.say, lambda: j.stop_requested,
+                                    hooks=hooks, on_chapter=lambda n, state, note: jobs.item(j, n, state, note))
             outlines, notes, roles = studio.annotation_context(book_id)
             done, failed = [], []
             for number in numbers:
                 if j.stop_requested:
-                    j.log.append("stopped")
+                    j.say("stopped")
                     break
-                j.set_item(number, "running")
+                jobs.item(j, number, "running")
                 result = annotate_chapter_to_disk(config_now, work, number, llm, book_id, lang, outlines, notes, roles,
-                                                  force=force, log=j.log.append, hooks=hooks, chunk_chars=chunk_chars)
+                                                  force=force, log=j.say, hooks=hooks, chunk_chars=chunk_chars)
                 note = f"{len(result.scene_doc['scenes'])} scenes" if result.scene_doc else result.note
-                j.set_item(number, {"ok": "done", "skip": "skipped", "missing": "error", "error": "error", "stopped": "stopped"}.get(result.status, "error"), note)
+                jobs.item(j, number, {"ok": "done", "skip": "skipped", "missing": "error", "error": "error", "stopped": "stopped"}.get(result.status, "error"), note)
                 (done if result.status == "ok" else failed if result.status in ("error", "missing") else []).append(number)
-            j.summary = {"done": done, "failed": failed}
+            return {"done": done, "failed": failed}
 
-        def save_record(j: Job) -> None:
-            ctx_config = config_now
-            ctx_config.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
+        return jobs.start(book_id, kind, numbers, executor or config_now.llm_default, run,
+                          save_record(work, config_now)).summary()
 
-        return jobs.start(job, run, save_record).public()
-
-    @app.get("/api/jobs/active")
-    def active_job():
-        job = jobs.latest()
-        return {"job": job.public() if job else None}
-
-    @app.get("/api/jobs/{job_id}")
-    def job(job_id: str, since: int = 0, stream_since: int | None = None):
-        item = jobs.items.get(job_id)
-        if item is None:
-            raise StudioError("job not found")
-        return item.public(since, stream_since)
-
-    @app.post("/api/jobs/{job_id}/stop")
-    def stop_job(job_id: str):
-        item = jobs.items.get(job_id)
-        if item is None:
-            raise StudioError("job not found")
-        item.stop_requested = True
-        item.log.append("stop requested ...")
-        return {"ok": True}
+    @app.get("/api/books/{book_id}/jobs/active")
+    def active_book_job(book_id: str):
+        """重新整理後，讓這一頁接回自己書上還在跑的任務（素材／音樂／語音／輸出頁用）。"""
+        job = jobs.latest_for(book_id)
+        return {"job": job.summary() if job is not None else None}
 
     # ---- 任務紀錄
     @app.get("/api/books/{book_id}/job-records")
@@ -533,24 +396,18 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         candidates = int(body["candidates"]) if body.get("candidates") else None
         regenerate = bool(body.get("regenerate"))
         backend = comfy_factory() if comfy_factory else art_gen.VendorBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
-                                     n=event.get("n"), of=event.get("of"), event=event["event"])
-            j.summary = art_studio.run_generation(config_now, work, backend, only=only, regenerate=regenerate, candidates=candidates,
-                                                  should_stop=lambda: j.stop_requested, on_progress=progress, log=j.log.append)
-            if j.summary.get("stopped"):
-                j.stop_requested = True  # 出圖途中被中斷，任務狀態記為「已停止」
+                jobs.update(j, phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
+                            n=event.get("n"), of=event.get("of"), event=event["event"])
+            result = art_studio.run_generation(config_now, work, backend, only=only, regenerate=regenerate, candidates=candidates,
+                                               should_stop=lambda: j.stop_requested, on_progress=progress, log=j.say)
+            if result.get("stopped"):
+                j.request_stop()  # 出圖途中被中斷，任務狀態記為「已停止」
+            return result
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     # ---- 外觀（外型卡、頭像、畫風庫、wildcard）
     def wild_library() -> dict[str, list[str]]:
@@ -594,26 +451,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
             raise StudioError("張數必須在 1 到 16 之間")
         wild, enabled = wild_library(), art_cards.load_enabled(work)
         backend = comfy_factory() if comfy_factory else art_gen.VendorBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event.get("asset_id") or event.get("char_id"), index=event["index"],
-                                     total=event["total"], n=event.get("n"), of=event.get("of"), event=event["event"])
-            j.summary = art_cards_studio.run_cards_generation(
+                jobs.update(j, phase="streaming", asset=event.get("asset_id") or event.get("char_id"), index=event["index"],
+                            total=event["total"], n=event.get("n"), of=event.get("of"), event=event["event"])
+            result = art_cards_studio.run_cards_generation(
                 config_now, work, backend, book_id=book_id, lang=lang, char_id=char_id, headshot=headshot, sprite=sprite,
                 candidates=candidates, wild=wild, enabled=enabled, should_stop=lambda: j.stop_requested,
-                on_progress=progress, log=j.log.append)
-            if j.summary.get("stopped"):
-                j.stop_requested = True
+                on_progress=progress, log=j.say)
+            if result.get("stopped"):
+                j.request_stop()
+            return result
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/art/cards/{char_id}/draft")
     async def cards_draft(book_id: str, char_id: str, request: Request):
@@ -747,27 +598,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         candidates = int(body.get("candidates") or 1)
         regenerate = bool(body.get("regenerate"))
         backend = audio_backend_factory() if audio_backend_factory else audio_gen.VendorAudioBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
-                                     n=event.get("n"), of=event.get("of"), event=event["event"])
+                jobs.update(j, phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
+                            n=event.get("n"), of=event.get("of"), event=event["event"])
             report = audio_gen.generate(config_now, work, backend, candidates=candidates, only=only, regenerate=regenerate,
                                         should_stop=lambda: j.stop_requested, progress=progress)
             for asset_id, reason in report.failed.items():
-                j.log.append(f"failed: {asset_id}: {reason}")
-            j.summary = {"generated": report.generated, "skipped": report.skipped, "failed": report.failed, "stopped": report.stopped}
+                j.say(f"failed: {asset_id}: {reason}")
             if report.stopped:
-                j.stop_requested = True
+                j.request_stop()
+            return {"generated": report.generated, "skipped": report.skipped, "failed": report.failed, "stopped": report.stopped}
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/art/audio/select")
     async def audio_select(book_id: str, request: Request):
@@ -812,45 +656,38 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         design_only = bool(body.get("design_only"))
         config_now = ctx.config
         backend = tts_backend_factory() if tts_backend_factory else voice_gen.VendorTtsBackend(config_now.comfyui_base_url)
-        job = Job(book_id, "tts", chapters, tts_executor(doc))
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    update = {"phase": "streaming", "event": event.get("event"), "index": event.get("index"),
-                              "total": event.get("total"), "line_id": event.get("line_id"),
-                              "speaker": event.get("speaker"), "char_id": event.get("char_id")}
-                    j.current.update({k: v for k, v in update.items() if v is not None})
-                    line_id = event.get("line_id")
-                    if line_id:
-                        chapter = int(voice_lines.chapter_of(line_id)[2:])
-                        if chapter in j.items:
-                            j.items[chapter]["note"] = line_id
-                    if event.get("event") == "voice":
-                        chapter = int(voice_lines.chapter_of(str(event["line_id"]))[2:])
-                        if chapter in j.items:
-                            j.items[chapter]["status"] = "running"
+                update = {"phase": "streaming", "event": event.get("event"), "index": event.get("index"),
+                          "total": event.get("total"), "line_id": event.get("line_id"),
+                          "speaker": event.get("speaker"), "char_id": event.get("char_id")}
+                jobs.update(j, {k: v for k, v in update.items() if v is not None})
+                line_id = event.get("line_id")
+                if not line_id:
+                    return
+                chapter = int(voice_lines.chapter_of(line_id)[2:])
+                if chapter not in chapters:
+                    return
+                jobs.item(j, chapter, note=line_id)
+                if event.get("event") == "voice":
+                    jobs.item(j, chapter, "running")
             report = voice_gen.generate(
                 config_now, work, backend, chapters=chapters, only=only, regenerate=regenerate,
                 include_narration=bool(body.get("include_narration")), design_only=design_only,
                 should_stop=lambda: j.stop_requested, progress=progress,
                 runner=tts_runner or voice_gen.run_ffmpeg)
             for line_id, reason in report.failed.items():
-                j.log.append(f"failed: {line_id}: {reason}")
-            for chapter in j.chapters:
+                j.say(f"failed: {line_id}: {reason}")
+            for chapter in chapters:
                 prefix = f"ch{chapter:03d}_"
-                j.items[chapter]["status"] = "error" if any(x.startswith(prefix) for x in report.failed) else "done"
-            j.summary = {"generated": report.generated, "skipped": report.skipped, "failed": report.failed,
-                         "designed": report.designed, "unvoiced": report.unvoiced, "stopped": report.stopped}
+                jobs.item(j, chapter, "error" if any(x.startswith(prefix) for x in report.failed) else "done")
             if report.stopped:
-                j.stop_requested = True
+                j.request_stop()
+            return {"generated": report.generated, "skipped": report.skipped, "failed": report.failed,
+                    "designed": report.designed, "unvoiced": report.unvoiced, "stopped": report.stopped}
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, "tts", chapters, tts_executor(doc), run, save_record(work, config_now)).summary()
 
     @app.get("/api/books/{book_id}/tts")
     def tts_overview(book_id: str):
@@ -953,17 +790,11 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     def start_export_job(book_id: str, label: str, work_fn: Callable[[], dict[str, Any]]):
         work = art_work(book_id)
         config_now = ctx.config
-        job = Job(book_id, label, [], "Ren'Py")
 
-        def run(j: Job) -> None:
-            j.summary = work_fn()
+        def run(_job: Any) -> dict[str, Any]:
+            return work_fn()
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, label, [], "Ren'Py", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/export/run")
     async def export_run(book_id: str, request: Request):
@@ -1014,9 +845,12 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.get("/")
     def index():
-        return FileResponse(UI_DIR / "index.html")
+        return fe.page(TEMPLATES / "index.html")
 
     app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
+    for sub in ("css", "fe", "vendor"):
+        if (FEKIT_DIR / sub).is_dir():
+            app.mount("/fekit/" + sub, StaticFiles(directory=FEKIT_DIR / sub), name="fekit-" + sub)
     return app
 
 
@@ -1029,40 +863,6 @@ def _payload(body: dict[str, Any]) -> dict[str, Any]:
             raise StudioError(f"not a supported file: {raw}")
         payload["files"].append({"name": path.name, "data": base64.b64encode(path.read_bytes()).decode("ascii")})
     return payload
-
-
-def list_dir(path: str, dirs_only: bool = False) -> dict[str, Any]:
-    """列資料夾（只列名稱）。空路徑回傳常用起點。"""
-    home = Path.home()
-    roots = [{"name": "home", "path": str(home)}]
-    for sub in ("Documents", "Desktop", "Downloads"):
-        if (home / sub).is_dir():
-            roots.append({"name": sub, "path": str(home / sub)})
-    if os.name == "nt":
-        import string
-        roots += [{"name": f"{c}:", "path": f"{c}:\\"} for c in string.ascii_uppercase if Path(f"{c}:\\").exists()]
-    out: dict[str, Any] = {"roots": roots, "path": "", "parent": None, "dirs": [], "files": []}
-    if not path:
-        return out
-    p = Path(path).expanduser()
-    while not p.is_dir():
-        if p.parent == p:
-            return out
-        p = p.parent
-    try:
-        names = sorted(os.listdir(p), key=str.lower)
-    except OSError as exc:
-        raise StudioError(f"cannot read folder: {exc}") from exc
-    for name in names:
-        if name.startswith((".", "$")):
-            continue
-        full = p / name
-        if full.is_dir():
-            out["dirs"].append(name)
-        elif not dirs_only and full.suffix.lower() in ALLOWED_EXTS:
-            out["files"].append(name)
-    out.update(path=str(p), parent=str(p.parent) if p.parent != p else None, sep=os.sep)
-    return out
 
 
 def main(argv: list[str] | None = None) -> int:

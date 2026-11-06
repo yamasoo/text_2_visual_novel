@@ -16,7 +16,8 @@ def js():
 
 
 def test_registers_page_and_component(js):
-    assert re.search(r"PAGES\.appearance\s*=\s*async\s+function", js)
+    # 頁面改由 fekit 註冊：路由字串 + ctx（原本是 PAGES.appearance = async function (bookId)）。
+    assert re.search(r'FE\.PAGES\["book/:id/appearance"\]\s*=\s*async\s*\(\s*ctx\s*\)', js)
     assert re.search(r"window\.AppearanceCards\s*=", js)
     assert re.search(r"\brender\b", js)
 
@@ -37,7 +38,8 @@ def test_uses_every_endpoint(js):
     for piece in ("/cards", "/cards/roll", "/cards/generate", "/draft", "/wildcards", "/wildcards/enabled",
                   "/styles", "/styles/upload", "/styles/apply", "/styles/clear", "/file?path="):
         assert piece in js, piece
-    assert "uploadFile(" in js
+    # 畫風表上傳改走 fekit 的 FE.upload（原本是頁面自己的 uploadFile()）。
+    assert "FE.upload(" in js
     assert "/styles/import" not in js, "畫風表改成選檔上傳，不再輸入路徑"
 
 
@@ -74,7 +76,8 @@ def test_per_character_generate_block(js):
 def test_uses_helpers_from_app(js):
     for helper in ("h(", "api(", "toast(", "fail(", "badge(", "crumbs("):
         assert helper in js, helper
-    assert "AiPanel.executor" in js and "AiPanel.poll" in js
+    # AiPanel.executor → Executors.value、AiPanel.poll → Panel.attach。
+    assert "Executors.value" in js and "Panel.attach" in js
 
 
 def test_no_hardcoded_book_or_host(js):

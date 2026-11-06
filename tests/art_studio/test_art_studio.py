@@ -75,8 +75,8 @@ def test_generate_job_then_select_and_status(tmp_path):
     http, config, fake = make_http(tmp_path)
     started = http.post("/api/books/demo/art/generate", json={"only": ["bg_dock_dawn"], "candidates": 2}).json()
     job = wait_job(http, started["id"])
-    assert job["status"] == "done" and job["summary"]["generated"] == ["bg_dock_dawn"]
-    assert any("還沒按" in line for line in job["log"])  # 提醒外觀未確認
+    assert job["status"] == "done" and job["result"]["generated"] == ["bg_dock_dawn"]
+    assert any("還沒按" in entry["text"] for entry in job["log"])  # 提醒外觀未確認
     assets = http.get("/api/books/demo/art/assets").json()
     bg = next(a for a in assets["assets"] if a["asset_id"] == "bg_dock_dawn")
     assert bg["status"] == "generated" and len(bg["candidates"]) == 2
@@ -101,7 +101,7 @@ def test_generate_stop(tmp_path):
     fake.stop_after = 0
     started = http.post("/api/books/demo/art/generate", json={"candidates": 1}).json()
     job = wait_job(http, started["id"])
-    assert job["status"] == "stopped" and job["summary"]["stopped"] is True
+    assert job["status"] == "stopped"   # fekit 的 result 在 stopped 時是 null；摘要留在任務紀錄裡
 
 
 def test_appearance_lists_title_screen_first(tmp_path):

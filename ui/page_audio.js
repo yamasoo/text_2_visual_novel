@@ -10,12 +10,21 @@
     final: ["定稿", "ok"],
   };
   const KINDS = { bgm: "BGM", ambience: "環境音" };
-  const POLL_MS = 1500;
   const FLOW_TEXT =
     "流程：AI 擬稿（曲風＋歌詞，純配樂）→ 出曲（YuE2 背景任務，每首要幾分鐘）→ 試聽候選 → 挑選（後端轉成 opus 並正規化音量）。";
   const STYLE_PLACEHOLDER =
     "英文標籤，逗號分隔，例如：calm acoustic guitar, 72 bpm, soft room tone, pure instrumental, no vocals";
   const LYRICS_PLACEHOLDER = "[Intro]\n(Soft guitar)\n\n[Chorus]\n(Light percussion)";
+
+  /* 進行中的出曲任務（照 page_assets.js 的 assetTrackers）：同一頁再開新任務、換分頁或
+     離開這一頁時一起收掉，遲到的回呼才不會改到已卸下的節點。識別字帶頁面前綴——
+     多支 classic script 共用全域。 */
+  const audioTrackers = new Set();
+
+  function closeAudioTrackers() {
+    for (const item of audioTrackers) item.close();
+    audioTrackers.clear();
+  }
 
   function kindBadge(item) {
     return badge(KINDS[item.kind] || item.kind, item.kind === "ambience" ? "info" : "");
@@ -26,8 +35,9 @@
     return badge(entry[0], entry[1]);
   }
 
-  async function render(bookId) {
+  async function render(bookId, ctx) {
     const base = `/api/books/${bookId}/art/audio`;
+    const sig = ctx ? { signal: ctx.signal } : {};
     const audioUrl = (relPath) => `${base}/file?path=${encodeURIComponent(relPath)}`;
 
     const wrap = h("div");
@@ -35,12 +45,11 @@
     const progress = h("div", { class: "card", hidden: true });
     const list = h("div");
     let kindFilter = "";
-    let pollTimer = null;
     let items = [];
     let lastData = null;
 
     async function load() {
-      const data = await api(base);
+      const data = await api(base, sig);
       items = data.items || [];
       lastData = data;
       return data;
@@ -55,7 +64,7 @@
     async function startJob(payload) {
       try {
         const job = await api(`${base}/generate`, { method: "POST", body: payload });
-        AiPanel.poll();
+        Panel.attach(job.id);
         watch(job.id);
       } catch (error) {
         fail(error);
@@ -64,84 +73,78 @@
 
     function watch(jobId) {
       progress.hidden = false;
-      if (pollTimer) clearTimeout(pollTimer);
-      const tick = async () => {
-        try {
-          const job = await api(`/api/jobs/${jobId}`);
-          const current = job.current || {};
-          const running = job.status === "running";
-          const title =
-            running
-              ? "出曲中"
-              : ({ done: "出曲完成", stopped: "已停止", error: "結束（有錯誤）" }[job.status] || job.status);
-          const percent = current.total
-            ? Math.round((100 * ((current.index || 1) - 1 + (current.event === "asset_done" ? 1 : 0))) / current.total)
-            : running
-              ? 0
-              : 100;
-          const currentLine = running
-            ? current.asset
-              ? `${current.asset}（第 ${current.index}/${current.total} 項` +
-                (current.of ? `，這項第 ${current.n}/${current.of} 首` : "") +
-                "）"
-              : "準備中…"
-            : "";
-          const summary = job.summary || {};
-          const generated = summary.generated || [];
-          const skipped = summary.skipped || [];
-          const failed = Object.entries(summary.failed || {});
+      let tracker = null;
+      const paint = (job) => {
+        if (job.gone) {
+          progress.replaceChildren(h("div", { class: "bad small" }, "找不到這個任務，後端可能重新啟動過。"));
+          return;
+        }
+        const running = job.status === "running" || job.status === "queued";
+        const title = running
+          ? "出曲中"
+          : ({ done: "出曲完成", stopped: "已停止", error: "結束（有錯誤）" }[job.status] || job.status);
+        const done = job.progress ? job.progress.done : 0;
+        const total = job.progress ? job.progress.total : 0;
+        const percent = total ? Math.round((100 * done) / total) : running ? 0 : 100;
+        const currentLine = running ? job.note || "準備中…" : "";
+        const result = job.result || {};
+        const generated = result.generated || [];
+        const skipped = result.skipped || [];
+        const failed = Object.entries(result.failed || {});
 
-          progress.replaceChildren(
-            h(
-              "div",
-              { class: "row", style: "align-items:center;gap:8px" },
-              h("strong", {}, title),
-              h("span", { class: "grow" }),
-              running
-                ? h(
-                    "button",
-                    {
-                      class: "sm",
-                      onclick: async () => {
-                        try {
-                          await api(`/api/jobs/${job.id}/stop`, { method: "POST", body: {} });
-                        } catch (error) {
-                          fail(error);
-                        }
-                      },
+        progress.replaceChildren(
+          h(
+            "div",
+            { class: "row", style: "align-items:center;gap:8px" },
+            h("strong", {}, title),
+            h("span", { class: "grow" }),
+            running
+              ? h(
+                  "button",
+                  {
+                    class: "sm",
+                    onclick: async () => {
+                      try {
+                        await tracker.stop();
+                      } catch (error) {
+                        fail(error);
+                      }
                     },
-                    "■ 停止"
-                  )
-                : ""
-            ),
-            h("div", { class: "bar" }, h("i", { style: `width:${percent}%` })),
-            h("div", { class: "small" }, currentLine),
-            !running
-              ? h(
-                  "div",
-                  { class: "small" },
-                  `新出曲 ${generated.length} 首，沒變動 ${skipped.length} 首` +
-                    (failed.length ? `，失敗 ${failed.length} 首` : "")
-                )
-              : "",
-            failed.length
-              ? h(
-                  "div",
-                  { class: "small bad" },
-                  ...failed.map(([id, reason]) => h("div", {}, `${id}：${reason}`))
+                  },
+                  "■ 停止"
                 )
               : ""
-          );
-          if (running) {
-            pollTimer = setTimeout(tick, POLL_MS);
-          } else {
-            await refresh();
-          }
-        } catch (error) {
-          progress.replaceChildren(h("div", { class: "bad small" }, error.message));
-        }
+          ),
+          h("div", { class: "bar" }, h("i", { style: `width:${percent}%` })),
+          h("div", { class: "small" }, currentLine),
+          !running
+            ? h(
+                "div",
+                { class: "small" },
+                `新出曲 ${generated.length} 首，沒變動 ${skipped.length} 首` +
+                  (failed.length ? `，失敗 ${failed.length} 首` : "")
+              )
+            : "",
+          failed.length
+            ? h(
+                "div",
+                { class: "small bad" },
+                ...failed.map(([id, reason]) => h("div", {}, `${id}：${reason}`))
+              )
+            : ""
+        );
       };
-      tick();
+      closeAudioTrackers();   // 先收掉前一個任務的追蹤器，再換成新的
+      tracker = FE.jobs.watch(jobId, {
+        base: "/api/fe-jobs",
+        onupdate: paint,
+        onend: (job) => {
+          audioTrackers.delete(tracker);
+          paint(job);
+          refresh().catch(fail);
+        },
+      });
+      audioTrackers.add(tracker);
     }
 
     async function scanFiles() {
@@ -230,7 +233,7 @@
         draftButton.textContent = "AI 擬稿中…";
         try {
           const body = {};
-          const executor = AiPanel.executor();
+          const executor = Executors.value();
           if (executor) body.executor = executor;
           const data = await api(`${base}/${item.asset_id}/draft`, { method: "POST", body });
           const prompt = data.prompt || {};
@@ -282,7 +285,7 @@
       }
 
       async function finish() {
-        const license = prompt(
+        const license = await ask(
           "定稿前請填授權／來源說明（例如：AI 生成，自用）",
           item.license || "AI 生成（YuE2），自用"
         );
@@ -401,17 +404,20 @@
     return wrap;
   }
 
-  PAGES.audio = async function (bookId) {
-    crumbs([
+  FE.PAGES["book/:id/audio"] = async (ctx) => {
+    const bookId = ctx.params.id;
+    // 離頁就停止追蹤（晚回來的結果不會蓋掉別頁）；監聽只掛一次，換任務時靠上面的 close。
+    closeAudioTrackers();
+    ctx.signal.addEventListener("abort", closeAudioTrackers, { once: true });
+    ctx.crumbs([
       { label: "書架", href: "#/" },
       { label: bookId, href: `#/book/${bookId}` },
       { label: "音樂" },
     ]);
-    $("#view").replaceChildren(h("div", { class: "muted" }, "載入中…"));
     try {
-      $("#view").replaceChildren(await render(bookId));
+      ctx.view(await render(bookId, ctx));
     } catch (error) {
-      $("#view").replaceChildren(h("div", { class: "card bad" }, error.message));
+      ctx.view(h("div", { class: "card bad" }, error.message));
     }
   };
 })();

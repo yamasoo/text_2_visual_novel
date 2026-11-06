@@ -20,21 +20,27 @@
   const PROMPT_PLACEHOLDER = "英文標籤，逗號分隔；打 __ 可叫出 wildcard";
   const HEADSHOT_TITLE = "頭像（頸部以上：髮型髮色、眼型眼色、頭飾、耳環、項鍊、特殊特徵；不含表情）";
   const SPRITE_TITLE = "立繪（頸部以下：衣服、身體、動作）";
-  const POLL_MS = 1500;
   const MAX_STYLE_OPTIONS = 200;
   const SUGGESTION_LIMIT = 12;
   const SUGGESTION_PATTERN = /__([a-z0-9_]*)$/;
+
+  // 進行中的任務追蹤器：換頁時一起收掉，遲到的回呼才不會改到已卸下的節點。
+  const trackers = new Set();
+
+  function closeTrackers() {
+    for (const item of trackers) item.close();
+    trackers.clear();
+  }
 
   function imgUrl(base, file) {
     return `${base}/file?path=${encodeURIComponent(file)}`;
   }
 
-  function jobPercent(current, running) {
-    const total = current && current.total ? current.total : 0;
+  function jobPercent(job, running) {
+    const progress = job && job.progress ? job.progress : null;
+    const total = progress && progress.total ? progress.total : 0;
     if (!total) return running ? 0 : 100;
-    const index = (current && current.index) || 1;
-    const bonus = current && current.event === "asset_done" ? 1 : 0;
-    return Math.round((100 * (index - 1 + bonus)) / total);
+    return Math.round((100 * (progress.done || 0)) / total);
   }
 
   function assetLabel(asset) {
@@ -154,10 +160,10 @@
   /* ---------------------------------------------------------------- 畫風 */
 
   function uploadStyles(base, file) {
-    if (typeof uploadFile !== "function") {
-      throw new Error("這個版本還沒有上傳功能（頁面缺少 uploadFile），請重新整理或回報");
+    if (typeof FE.upload !== "function") {
+      throw new Error("這個版本還沒有上傳功能（頁面缺少 FE.upload），請重新整理或回報");
     }
-    return uploadFile(`${base}/styles/upload`, file);
+    return FE.upload(`${base}/styles/upload`, file);
   }
 
   function stylePane(state) {
@@ -500,7 +506,7 @@
       draftButton.textContent = "AI 草擬中…";
       try {
         const body = {};
-        const executor = AiPanel.executor();
+        const executor = Executors.value();
         if (executor) body.executor = executor;
         const data = await api(`${state.base}/cards/${character.id}/draft`, {
           method: "POST",
@@ -587,29 +593,20 @@
       progressDetails,
       progressError
     );
-    let timer = null;
-    let jobId = "";
+    let tracker = null;
 
-    const paintProgress = (current) => {
-      barFill.style.width = `${jobPercent(current, true)}%`;
-      const asset = current && current.asset ? current.asset : "";
-      if (!asset) {
-        progressLine.textContent = "準備中…";
-        return;
-      }
-      const total = current.total || 0;
-      let text = `${asset}（第 ${current.index}/${total} 項`;
-      if (current.of) text += `，這項第 ${current.n}/${current.of} 張`;
-      progressLine.textContent = `${text}）`;
+    const paintProgress = (job) => {
+      barFill.style.width = `${jobPercent(job, true)}%`;
+      progressLine.textContent = job.note || "準備中…";
     };
 
     const paintFinished = (job) => {
       const status = job.status;
       progressTitle.textContent =
         status === "done" ? "出圖完成" : status === "stopped" ? "已停止" : "結束（有錯誤）";
-      barFill.style.width = `${jobPercent(job.current || {}, false)}%`;
+      barFill.style.width = `${jobPercent(job, false)}%`;
       stopButton.hidden = true;
-      const summary = job.summary || {};
+      const summary = job.result || {};
       const generated = summary.generated || [];
       const skipped = summary.skipped || [];
       const failed = summary.failed || {};
@@ -682,30 +679,43 @@
       }
     };
 
-    const tick = async () => {
-      let job;
-      try {
-        job = await api(`/api/jobs/${jobId}`);
-      } catch (error) {
-        progressError.textContent = error.message || String(error);
-        progressError.hidden = false;
-        timer = setTimeout(tick, POLL_MS);
-        return;
-      }
-      progressError.hidden = true;
-      if (job.status === "running") {
-        paintProgress(job.current || {});
-        timer = setTimeout(tick, POLL_MS);
-        return;
-      }
-      paintFinished(job);
-      generateButton.disabled = false;
-      await reloadAssets();
+    const closeTracker = () => {
+      const active = tracker;
+      tracker = null;
+      if (!active) return;
+      trackers.delete(active);
+      active.close();
+    };
+
+    const watchJob = (jobId) => {
+      closeTracker();
+      const watcher = FE.jobs.watch(jobId, {
+        base: "/api/fe-jobs",
+        onupdate: (job) => {
+          progressError.hidden = true;
+          if (job.status === "running" || job.status === "queued") paintProgress(job);
+        },
+        onconn: (state, error) => {
+          if (state !== "retrying" && state !== "gone") return;
+          progressError.textContent = (error && error.message) || "任務連線中斷，重試中";
+          progressError.hidden = false;
+        },
+        onend: async (job) => {
+          tracker = null;
+          trackers.delete(watcher);
+          paintFinished(job);
+          generateButton.disabled = false;
+          await reloadAssets();
+        },
+      });
+      tracker = watcher;
+      trackers.add(watcher);
     };
 
     stopButton.addEventListener("click", async () => {
+      if (!tracker) return;
       try {
-        await api(`/api/jobs/${jobId}/stop`, { method: "POST", body: {} });
+        await tracker.stop();
       } catch (error) {
         fail(error);
       }
@@ -737,8 +747,7 @@
             candidates: count,
           },
         });
-        AiPanel.poll();
-        jobId = job.id;
+        Panel.attach(job.id);
         generateButton.disabled = true;
         progressCard.hidden = false;
         progressTitle.textContent = "出圖中";
@@ -747,8 +756,7 @@
         progressError.hidden = true;
         barFill.style.width = "0%";
         stopButton.hidden = false;
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(tick, POLL_MS);
+        watchJob(job.id);
       } catch (error) {
         fail(error);
       }
@@ -847,17 +855,20 @@
     return root;
   }
 
-  PAGES.appearance = async function (bookId) {
-    crumbs([
+  FE.PAGES["book/:id/appearance"] = async (ctx) => {
+    const bookId = ctx.params.id;
+    closeTrackers();
+    ctx.signal.addEventListener("abort", closeTrackers, { once: true });
+    ctx.crumbs([
       { label: "書架", href: "#/" },
       { label: bookId, href: `#/book/${bookId}` },
       { label: "角色外型卡" },
     ]);
-    $("#view").replaceChildren(h("div", { class: "muted" }, "載入中…"));
+    ctx.view(h("div", { class: "muted" }, "載入中…"));
     try {
-      $("#view").replaceChildren(await render(bookId));
+      ctx.view(await render(bookId));
     } catch (error) {
-      $("#view").replaceChildren(h("div", { class: "card bad" }, error.message));
+      ctx.view(h("div", { class: "card bad" }, error.message));
     }
   };
 

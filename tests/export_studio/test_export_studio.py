@@ -107,7 +107,7 @@ def test_routes(tmp_path):
     assert http.put("/api/books/demo/export/settings", json={"sdk": "S", "project": "P"}).json() == {"sdk": "S", "project": "P"}
     started = http.post("/api/books/demo/export/run", json={"chapters": [1]}).json()
     done = wait_job(http, started["id"])
-    assert done["status"] == "error" and any("找不到 Ren'Py 專案" in line for line in done["log"])
+    assert done["status"] == "error" and any("找不到 Ren'Py 專案" in entry["text"] for entry in done["log"])
     assert http.get("/api/books/demo/export/report", params={"name": "../x"}).status_code == 400
 
 
@@ -151,4 +151,4 @@ def test_package_route_reports_missing_sdk(tmp_path):
     http = TestClient(app, base_url="http://127.0.0.1:7866")
     started = http.post("/api/books/demo/export/package").json()
     done = wait_job(http, started["id"])
-    assert done["status"] == "error" and any("SDK" in line for line in done["log"])
+    assert done["status"] == "error" and any("SDK" in entry["text"] for entry in done["log"])

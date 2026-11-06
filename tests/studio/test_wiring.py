@@ -1,4 +1,4 @@
-"""S4b 第一批模組接上伺服器：串流緩衝、任務紀錄、總覽、設定集、風格、場景歷史。"""
+"""S4b 第一批模組接上伺服器：任務串流、任務紀錄、總覽、設定集、風格、場景歷史。"""
 from __future__ import annotations
 
 import json
@@ -25,12 +25,11 @@ def test_job_stream_and_record(tmp_path):
     http, studio, config = make_http(tmp_path)
     job = run_job(http)
     assert job["status"] == "done"
-    stream = http.get(f"/api/jobs/{job['id']}?stream_since=0").json()["stream"]
-    kinds = {e["type"] for e in stream["events"]}
-    assert {"begin", "text", "end"} <= kinds and stream["last"] >= 3
-    later = http.get(f"/api/jobs/{job['id']}?stream_since={stream['last']}").json()["stream"]
-    assert later["events"] == []
-    assert "stream" not in http.get(f"/api/jobs/{job['id']}").json()
+    patch = http.get(f"/api/fe-jobs/{job['id']}?since=0").json()
+    kinds = {e["type"] for e in patch["stream"]}
+    assert {"begin", "text", "end"} <= kinds and patch["seq"] > 0
+    later = http.get(f"/api/fe-jobs/{job['id']}?since={patch['seq']}").json()
+    assert later["stream"] == [] and later["log"] == []
     # 任務結束後自動存紀錄
     rows = http.get("/api/books/demo/job-records").json()["records"]
     assert [r["id"] for r in rows] == [job["id"]] and rows[0]["status"] == "done"
@@ -72,17 +71,13 @@ def test_overview_bible_style_history(tmp_path):
     assert http.post("/api/books/demo/chapters/1/history/restore", json={"name": "../../x"}).status_code == 400
 
 
-def test_job_events_label_chunks():
-    from t2vn.server import Job
-    job = Job("demo", "annotate", [3])
-    job.set_item(3, "running")
-    job.event("chunk", {"index": 2, "total": 4, "first": 40, "last": 79})
-    job.event("request", {"round": 1})
-    job.event("delta", {"chars": 3, "text": "abc"})
-    job.event("response", {"usage": {}})
-    public = job.public(0, 0)
-    assert public["current"]["chunk"] == "2/4" and public["current"]["chunk_range"] == [40, 79]
-    begin = public["stream"]["events"][0]
-    assert begin["type"] == "begin" and "第 2/4 塊" in begin["label"] and "第 1 輪" in begin["label"]
-    job.set_item(4, "running")
-    assert "chunk" not in job.public(0)["current"]
+def test_job_events_label_chunks(tmp_path):
+    """真的跑一個任務：模型輸出變成 fekit stream 的 begin／text／end，label 有章與輪。"""
+    http, studio, config = make_http(tmp_path)
+    job = run_job(http)
+    stream = http.get(f"/api/fe-jobs/{job['id']}?since=0").json()["stream"]
+    begin = next(e for e in stream if e["type"] == "begin")
+    assert begin["label"].startswith("第 1 章") and "第 1 輪" in begin["label"]
+    seg = begin["seg"]
+    assert any(e["type"] == "text" and e["seg"] == seg and e.get("text") for e in stream)
+    assert any(e["type"] == "end" and e["seg"] == seg for e in stream)

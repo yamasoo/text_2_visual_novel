@@ -70,10 +70,10 @@ def test_tts_models_endpoint(book, monkeypatch):
 def test_tts_generate_job_and_voice_map(book):
     http = client(book)
     started = http.post("/api/books/demo/tts/generate", json={"chapters": [1]}).json()
-    assert started["kind"] == "tts" and started["chapters"] == [1]
+    assert started["kind"] == "tts"
     job = wait_job(http, started["id"])
     assert job["status"] == "done", job["log"]
-    assert len(job["summary"]["generated"]) == 10
+    assert len(job["result"]["generated"]) == 10
     assert (book.work / "voice" / "VoiceMap.json").is_file()
     view = http.get("/api/books/demo/tts").json()
     assert view["totals"]["generated"] == 10 and view["totals"]["pending"] == 0
@@ -86,7 +86,7 @@ def test_tts_compat_endpoint(book):
     started = http.post("/tts/generate", json={"book_id": "demo", "chapters": [1], "only": ["ch001_sc02_l003"]}).json()
     job = wait_job(http, started["id"])
     assert job["status"] == "done"
-    assert job["summary"]["generated"] == ["ch001_sc02_l003"]
+    assert job["result"]["generated"] == ["ch001_sc02_l003"]
 
 
 def test_tts_compat_requires_book_id(book):
@@ -108,7 +108,7 @@ def test_tts_design_endpoint(book):
     started = http.post("/api/books/demo/tts/design", json={}).json()
     job = wait_job(http, started["id"])
     assert job["status"] == "done"
-    assert job["summary"]["designed"] == ["lao_zhang"]
+    assert job["result"]["designed"] == ["lao_zhang"]
 
 
 def test_tts_file_preview(book):

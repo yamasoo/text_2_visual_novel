@@ -2,7 +2,6 @@
 (function () {
   "use strict";
 
-  const POLL_MS = 1500;
   const MAX_LIST = 10;
   const CASE_ROWS = [
     ["launch", "啟動"],
@@ -37,6 +36,16 @@
     stopped: "打包已停止",
   };
 
+  /* 進行中的匯出／驗收／打包任務（照 page_assets.js 的 assetTrackers）：換任務或離開
+     這一頁時一起收掉，遲到的回呼才不會改到已卸下的節點。識別字帶頁面前綴——多支
+     classic script 共用全域。 */
+  const exportTrackers = new Set();
+
+  function closeExportTrackers() {
+    for (const item of exportTrackers) item.close();
+    exportTrackers.clear();
+  }
+
   function sizeText(bytes) {
     const mb = (Number(bytes) || 0) / (1024 * 1024);
     return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round((Number(bytes) || 0) / 1024))} KB`;
@@ -70,20 +79,22 @@
     );
   }
 
-  function lastLogLine(job) {
-    const log = job && Array.isArray(job.log) ? job.log : [];
-    return log.length ? String(log[log.length - 1]) : "";
+  // fe 任務的 log 每筆是 {level,text}；舊紀錄是純字串，兩種都讀得懂。
+  function logText(entry) {
+    return entry && typeof entry === "object" ? String(entry.text === undefined ? "" : entry.text) : String(entry);
   }
 
-  function progressCard(host, title, job) {
-    const current = (job && job.current) || {};
-    const percent = current.total
-      ? Math.round((100 * ((current.index || 1) - 1 + (current.event === "asset_done" ? 1 : 0))) / current.total)
-      : 0;
-    const line =
-      current.chapter || current.asset
-        ? `${current.chapter || current.asset}（第 ${current.index || 1}/${current.total || 1} 步）`
-        : lastLogLine(job) || "準備中…";
+  function lastLogLine(job) {
+    const log = job && Array.isArray(job.log) ? job.log : [];
+    return log.length ? logText(log[log.length - 1]) : "";
+  }
+
+  // 進度條吃 fe 任務物件：百分比看 progress（{done,total} 或 null），說明行看 note。
+  function progressCard(host, title, job, tracker) {
+    const progress = job && job.progress;
+    const percent =
+      progress && progress.total ? Math.round((100 * (Number(progress.done) || 0)) / progress.total) : 0;
+    const line = (job && job.note) || lastLogLine(job) || "準備中…";
     host.hidden = false;
     host.replaceChildren(
       h(
@@ -91,14 +102,14 @@
         { class: "row", style: "align-items:center;gap:8px" },
         h("strong", {}, title),
         h("span", { class: "grow" }),
-        job && job.id
+        tracker
           ? h(
               "button",
               {
                 class: "sm",
                 onclick: async () => {
                   try {
-                    await api(`/api/jobs/${job.id}/stop`, { method: "POST", body: {} });
+                    await tracker.stop();
                   } catch (error) {
                     fail(error);
                   }
@@ -113,16 +124,17 @@
     );
   }
 
-  async function render(bookId) {
+  async function render(bookId, ctx) {
     const base = `/api/books/${bookId}`;
-    let data = await api(`${base}/export`);
+    const sig = ctx ? { signal: ctx.signal } : {};
+    let data = await api(`${base}/export`, sig);
 
     let running = "";        // "" | "export" | "verify" | "package"
     let liveJob = null;      // 目前執行中的 job
     let exportJob = null;    // 最近一次匯出任務（完成後保留摘要）
     let verifyJob = null;    // 最近一次驗收任務
     let packageJob = null;   // 最近一次打包任務
-    let timer = null;
+    let tracker = null;      // 目前任務的追蹤器（停止鈕用）
     let chapterNumbers = null;   // 已勾選的章號（null＝預設全選）
     let reportView = null;
 
@@ -151,7 +163,7 @@
     }
 
     async function reload() {
-      data = await api(`${base}/export`);
+      data = await api(`${base}/export`, sig);
       paintAll();
     }
 
@@ -159,47 +171,52 @@
       if (running) return;
       try {
         const job = await api(`${base}${path}`, { method: "POST", body: payload });
-        AiPanel.poll();
+        Panel.attach(job.id);
         running = kind;
         liveJob = job;
         paintAll();
-        poll(job.id, kind);
+        watchJob(job.id, kind);
       } catch (error) {
         fail(error);
       }
     }
 
-    function poll(jobId, kind) {
-      if (timer) clearTimeout(timer);
-      const tick = async () => {
-        let job;
-        try {
-          job = await api(`/api/jobs/${jobId}`);
-        } catch (error) {
-          fail(error);
-          return;
-        }
-        liveJob = job;
-        if (job.status === "running") {
-          if (kind === "export") progressCard(exportProgress, EXPORT_TITLE.running, job);
-          else if (kind === "verify") progressCard(verifyProgress, VERIFY_TITLE.running, job);
-          else progressCard(packageProgress, PACKAGE_TITLE.running, job);
-          timer = setTimeout(tick, POLL_MS);
-          return;
-        }
-        running = "";
-        liveJob = null;
-        if (kind === "export") exportJob = job;
-        else if (kind === "verify") verifyJob = job;
-        else packageJob = job;
-        try {
-          await reload();
-        } catch (error) {
-          fail(error);
-          paintAll();
-        }
-      };
-      tick();
+    function progressHost(kind) {
+      return kind === "export" ? exportProgress : kind === "verify" ? verifyProgress : packageProgress;
+    }
+
+    function progressTitle(kind) {
+      return kind === "export" ? EXPORT_TITLE.running : kind === "verify" ? VERIFY_TITLE.running : PACKAGE_TITLE.running;
+    }
+
+    // 進度與結束交給 fekit 的追蹤器（SSE，斷線自動退回輪詢）；頁面自己不再計時。
+    function watchJob(jobId, kind) {
+      const host = progressHost(kind);
+      const title = progressTitle(kind);
+      closeExportTrackers();   // 先收掉前一個任務的追蹤器，再換成新的
+      tracker = FE.jobs.watch(jobId, {
+        base: "/api/fe-jobs",
+        onupdate(job) {
+          liveJob = job;
+          progressCard(host, title, job, tracker);
+        },
+        async onend(job) {
+          exportTrackers.delete(tracker);
+          running = "";
+          liveJob = null;
+          tracker = null;
+          if (kind === "export") exportJob = job;
+          else if (kind === "verify") verifyJob = job;
+          else packageJob = job;
+          try {
+            await reload();
+          } catch (error) {
+            fail(error);
+            paintAll();
+          }
+        },
+      });
+      exportTrackers.add(tracker);
     }
 
     /* ---------------------------------------------------------------- 標題畫面 */
@@ -305,7 +322,7 @@
     /* ---------------------------------------------------------------- 匯出 */
     function exportSummaryBlock() {
       if (!exportJob) return "";
-      const summary = exportJob.summary || {};
+      const summary = exportJob.result || {};
       const status = exportJob.status;
       const warnings = Array.isArray(summary.warnings) ? summary.warnings : [];
       const issues = Array.isArray(summary.issues) ? summary.issues : [];
@@ -409,14 +426,14 @@
         exportSummaryBlock()
       );
       exportHost.replaceChildren(exportCard);
-      if (running === "export" && liveJob) progressCard(exportProgress, EXPORT_TITLE.running, liveJob);
+      if (running === "export" && liveJob) progressCard(exportProgress, EXPORT_TITLE.running, liveJob, tracker);
       else exportProgress.hidden = true;
     }
 
     /* ---------------------------------------------------------------- 自動驗收 */
     function verifySummaryBlock() {
       if (!verifyJob) return "";
-      const summary = verifyJob.summary || {};
+      const summary = verifyJob.result || {};
       const cases = summary.cases || {};
       const status = verifyJob.status;
       const log = lastLogLine(verifyJob);
@@ -465,7 +482,7 @@
         verifySummaryBlock()
       );
       verifyHost.replaceChildren(verifyCard);
-      if (running === "verify" && liveJob) progressCard(verifyProgress, VERIFY_TITLE.running, liveJob);
+      if (running === "verify" && liveJob) progressCard(verifyProgress, VERIFY_TITLE.running, liveJob, tracker);
       else verifyProgress.hidden = true;
     }
 
@@ -514,7 +531,7 @@
 
     function packageJobLog(job) {
       const log = job && Array.isArray(job.log) ? job.log : [];
-      return log.slice(-12).map((line) => String(line));
+      return log.slice(-12).map(logText);
     }
 
     function paintPackage() {
@@ -538,14 +555,14 @@
         packageSummaryBlock()
       );
       packageHost.replaceChildren(packageCard);
-      if (running === "package" && liveJob) progressCard(packageProgress, PACKAGE_TITLE.running, liveJob);
+      if (running === "package" && liveJob) progressCard(packageProgress, PACKAGE_TITLE.running, liveJob, tracker);
       else packageProgress.hidden = true;
     }
 
     /* ---------------------------------------------------------------- 驗收報告 */
     async function showReport(report) {
       try {
-        const data = await api(`${base}/export/report?name=${encodeURIComponent(report.name)}`);
+        const data = await api(`${base}/export/report?name=${encodeURIComponent(report.name)}`, sig);
         const screens = Array.isArray(report.screens) ? report.screens : [];
         reportView.hidden = false;
         reportView.replaceChildren(
@@ -625,17 +642,16 @@
     return wrap;
   }
 
-  PAGES.export = async function (bookId) {
-    crumbs([
+  FE.PAGES["book/:id/export"] = async (ctx) => {
+    const bookId = ctx.params.id;
+    // 離頁就停止追蹤（晚回來的結果不會蓋掉別頁）；監聽只掛一次，換任務時靠上面的 close。
+    closeExportTrackers();
+    ctx.signal.addEventListener("abort", closeExportTrackers, { once: true });
+    ctx.crumbs([
       { label: "書架", href: "#/" },
       { label: bookId, href: `#/book/${bookId}` },
       { label: "輸出" },
     ]);
-    $("#view").replaceChildren(h("div", { class: "muted" }, "載入中…"));
-    try {
-      $("#view").replaceChildren(await render(bookId));
-    } catch (error) {
-      $("#view").replaceChildren(h("div", { class: "card bad" }, error.message));
-    }
+    ctx.view(await render(bookId, ctx));
   };
 })();

@@ -16,7 +16,7 @@ def js():
 
 
 def test_existing_structure_kept(js):
-    assert re.search(r"PAGES\.assets\s*=\s*async\s+function", js)
+    assert re.search(r'FE\.PAGES\["book/:id/assets"\]\s*=\s*async\s*\(ctx\)\s*=>', js)
     for name in ("listPane", "lookPane", "stylePane", "AppearanceCards.render", "/select", "/generate", "/refresh", "/status", "/appearance"):
         assert name in js, name
 
