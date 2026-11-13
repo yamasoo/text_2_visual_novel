@@ -9,13 +9,11 @@ import argparse
 import base64
 import json
 import os
+import sys
 import threading
-import time
-import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,24 +22,34 @@ from fastapi.staticfiles import StaticFiles
 from .annotate import annotate_chapter_to_disk
 from .config import Config, load_config
 from .errors import T2vnError
-from .errors import JobStopped
 from .extract import extract_book
 from . import art_cards, art_cards_studio, art_gen, art_studio, audio_gen, bible, candidate_files, export_studio, history, jobrecords, overview, style_edit
 from . import sherpa_tts, voice_gen, voice_lines
+from . import comic
 from .chunked import chunk_chars_for
-from .streambuf import StreamBuffer
-from .llm import LlmError, LlmFn, RunHooks, key_status, make_executor
+from .llm import LlmError, LlmFn, key_status, make_executor
 from .settings import apply_settings, check_connection, read_settings, store_key
 from .studio import Studio, StudioError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# fekit 的 Python 輔助是 vendor/fekit/py 裡的複製品；要在 import fekit 之前加進 sys.path。
+sys.path.insert(0, str(REPO_ROOT / "vendor" / "fekit" / "py"))
+
+from fekit import JobRunner, install, save_upload  # noqa: E402
+
+from .jobs_bridge import FE_JOBS_BASE, Jobs  # noqa: E402
+
 UI_DIR = REPO_ROOT / "ui"
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+FEKIT_DIR = REPO_ROOT / "vendor" / "fekit"
+TEMPLATES = REPO_ROOT / "templates"
+
 ALLOWED_EXTS = {".txt", ".md", ".markdown", ".text", ".docx", ".epub"}
 JOB_KINDS = ("annotate", "extract")
 ART_JOB_KIND = "art"
 JOB_RECORDS_KEEP = 50
 STYLE_REL = Path(bible.STYLE_FILE)
+STYLES_MAX_BYTES = 20 * 1024 * 1024  # 畫風表是幾十列的 xlsx；20 MB 已經很寬鬆，再大就是送錯檔
+RENDER_MAX_CANDIDATES = 12  # 補圖時每格最多幾張候選（第四段）；一章 45 格，再高就是手滑
 
 
 def tts_executor(doc: dict[str, Any] | None) -> str:
@@ -49,126 +57,29 @@ def tts_executor(doc: dict[str, Any] | None) -> str:
     return "sherpa-onnx" if (doc or {}).get("engine") == "sherpa-onnx" else "ComfyUI"
 
 
-class Job:
-    """一個背景任務。UI 用 ``public()`` 取得進度：逐章狀態、目前步驟、串流字數、token、紀錄。"""
-
-    def __init__(self, book_id: str, kind: str, chapters: list[int], executor: str = ""):
-        self.id = uuid.uuid4().hex[:10]
-        self.book_id, self.kind, self.chapters = book_id, kind, chapters
-        self.executor = executor  # 這個任務用的 AI 執行者（"供應商" 或 "供應商/模型"）
-        self.status = "running"  # running | done | error | stopped
-        self.log: list[str] = []
-        self.summary: dict[str, Any] = {}
-        self.started = time.time()
-        self.ended: float | None = None
-        self.stop_requested = False
-        self.items = {n: {"no": n, "status": "pending", "note": ""} for n in chapters}
-        self.current: dict[str, Any] = {"chapter": None, "phase": "idle", "round": 0, "chars": 0, "since": time.time()}
-        self.tokens = 0
-        self.stream = StreamBuffer()  # 模型串流輸出（網頁右側 AI 面板用）
-        self.lock = threading.Lock()
-
-    def set_item(self, number: int, status: str, note: str = "") -> None:
-        with self.lock:
-            self.items[number] = {"no": number, "status": status, "note": note}
-            if status == "running":
-                self.current = {"chapter": number, "phase": "starting", "round": 0, "chars": 0, "since": time.time()}
-
-    def event(self, kind: str, info: dict[str, Any]) -> None:
-        """RunHooks.on_event：更新目前步驟。"""
-        with self.lock:
-            cur = self.current
-            if kind == "request":
-                cur.update(phase="waiting", round=info["round"], chars=0, since=time.time())
-                chapter = cur.get("chapter")
-                where = f"第 {chapter} 章" + (f" · 第 {cur['chunk']} 塊" if cur.get("chunk") else "") if chapter else ""
-                self.stream.begin(" · ".join(x for x in (where, f"第 {info['round']} 輪") if x))
-            elif kind == "chunk":
-                cur.update(chunk=f"{info['index']}/{info['total']}", chunk_range=[info["first"], info["last"]])
-            elif kind == "delta":
-                cur.update(phase="streaming", chars=info["chars"])
-                self.stream.add(info.get("text", ""))
-            elif kind == "thinking":
-                cur.update(phase="thinking")
-                self.stream.add(info.get("text", ""), thinking=True)
-            elif kind == "response":
-                self.stream.end()
-                self.tokens += info["usage"].get("prompt_tokens", 0) + info["usage"].get("completion_tokens", 0)
-                cur.update(phase="checking", since=time.time())
-            elif kind == "repair":
-                cur.update(phase="repair", count=info.get("count", 0), since=time.time())
-
-    def hooks(self) -> RunHooks:
-        return RunHooks(should_stop=lambda: self.stop_requested, on_event=self.event)
-
-    def record(self) -> dict[str, Any]:
-        """存成任務紀錄用的完整內容（``jobrecords.save_record``）。"""
-        data = self.public(0)
-        data["started"], data["ended"] = self.started, self.ended
-        data.pop("current", None)
-        return data
-
-    def public(self, since: int = 0, stream_since: int | None = None) -> dict[str, Any]:
-        now = time.time()
-        with self.lock:
-            out = {
-                "id": self.id, "book_id": self.book_id, "kind": self.kind, "chapters": self.chapters, "status": self.status,
-                "executor": self.executor,
-                "items": [self.items[n] for n in self.chapters], "current": dict(self.current),
-                "tokens": self.tokens, "stop_requested": self.stop_requested,
-                "elapsed": round((self.ended or now) - self.started, 1),
-                "log": self.log[since:], "log_total": len(self.log), "summary": self.summary,
-            }
-        if stream_since is not None:
-            out["stream"] = self.stream.read(stream_since)
-        return out
-
-
-class Jobs:
-    """一本書同時只跑一個任務（標註與抽取都會寫同一份 cast.json）。"""
-
-    def __init__(self) -> None:
-        self.items: dict[str, Job] = {}
-        self.lock = threading.Lock()
-
-    def running_for(self, book_id: str) -> Job | None:
-        return next((j for j in self.items.values() if j.book_id == book_id and j.status == "running"), None)
-
-    def latest(self) -> Job | None:
-        """正在跑的任務優先，否則最近結束的。"""
-        running = [j for j in self.items.values() if j.status == "running"]
-        pool = running or list(self.items.values())
-        return max(pool, key=lambda j: j.started) if pool else None
-
-    def start(self, job: Job, target: Callable[[Job], None], on_finish: Callable[[Job], None] | None = None) -> Job:
-        with self.lock:
-            if self.running_for(job.book_id):
-                raise StudioError("another job is still running for this book")
-            self.items[job.id] = job
-
-        def run() -> None:
-            try:
-                target(job)
-                job.status = "stopped" if job.stop_requested else ("error" if job.summary.get("failed") else "done")
-            except JobStopped:
-                job.status = "stopped"
-            except T2vnError as exc:
-                job.log.append(f"error: {exc}")
-                job.status = "error"
-            except Exception as exc:  # noqa: BLE001 — 背景執行緒不能默默死掉
-                job.log.append(f"unexpected error: {type(exc).__name__}: {exc}")
-                job.status = "error"
-            finally:
-                job.ended = time.time()
-                job.current["phase"] = "finished"
-                if on_finish is not None:
-                    try:
-                        on_finish(job)
-                    except Exception as exc:  # noqa: BLE001 — 存不了紀錄不能讓任務狀態壞掉
-                        job.log.append(f"could not save job record: {exc}")
-
-        threading.Thread(target=run, daemon=True).start()
-        return job
+def render_subset(body: dict[str, Any]) -> tuple[int | None, str | None, int | None]:
+    """出圖子集（第四段）：page ≥ 1、panel 是格 id、candidates 1–RENDER_MAX_CANDIDATES。
+    空白字串等於沒指定，不傳就整章。"""
+    page: int | None = None
+    raw = body.get("page")
+    if raw not in (None, ""):
+        try:
+            page = int(raw)
+        except (TypeError, ValueError):
+            raise StudioError("page 必須是正整數") from None
+        if page < 1:
+            raise StudioError("page 必須是正整數")
+    panel = str(body.get("panel") or "").strip() or None
+    candidates: int | None = None
+    raw = body.get("candidates")
+    if raw not in (None, ""):
+        try:
+            candidates = int(raw)
+        except (TypeError, ValueError):
+            raise StudioError("candidates 必須是 1 到 %d 的整數" % RENDER_MAX_CANDIDATES) from None
+        if not 1 <= candidates <= RENDER_MAX_CANDIDATES:
+            raise StudioError("candidates 必須是 1 到 %d 的整數" % RENDER_MAX_CANDIDATES)
+    return page, panel, candidates
 
 
 class Context:
@@ -187,33 +98,38 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
                port: int | None = None, comfy_factory: Callable[[], Any] | None = None,
                audio_backend_factory: Callable[[], Any] | None = None, audio_runner: Callable[[list[str]], tuple[int, str]] | None = None,
                tts_backend_factory: Callable[[], Any] | None = None, tts_runner: Callable[[list[str]], tuple[int, str]] | None = None,
-               wildcard_dir: Path | None = None):
+               wildcard_dir: Path | None = None, token: str | None = None):
     ctx = Context(config, config_path)
     wild_dir = Path(wildcard_dir) if wildcard_dir is not None else REPO_ROOT / "vendor" / "wildcards"
-    jobs = Jobs()
     app = FastAPI(title="text_2_visual_novel studio")
+
+    runner = JobRunner()                       # 同時 1 個任務；滿了回 409（舊的是同書 400）
+    jobs = Jobs(runner)
+    # 本機保護（Host、Origin、X-FE-Token）、錯誤格式、/api/fe-jobs 與 /api/fs/list 端點。
+    fe = install(
+        app, app_name="t2vn", jobs=runner, jobs_base=FE_JOBS_BASE,
+        fs=True,
+        token=token or os.environ.get("T2VN_FE_TOKEN") or None,
+    )
 
     def get_llm(executor: str | None = None) -> LlmFn:
         if llm_factory is not None:
             return llm_factory()
         return make_executor(ctx.config, executor or None)
 
-    # ---- 只收本機連線
-    @app.middleware("http")
-    async def local_only(request: Request, call_next):
-        host = urlsplit("//" + (request.headers.get("host") or "")).hostname
-        if host not in LOCAL_HOSTS:
-            return JSONResponse({"error": "local access only"}, status_code=403)
-        origin = request.headers.get("origin")
-        if request.method not in ("GET", "HEAD") and origin and urlsplit(origin).hostname not in LOCAL_HOSTS:
-            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
-        return await call_next(request)
+    def save_record(work: Path, config_now: Config) -> Callable[[Any], None]:
+        """任務結束時的存檔回呼：寫一份 work/_jobs/<id>.json 並修剪舊的。"""
+        def on_finish(job: Any) -> None:
+            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{job.id}.json")
+            jobrecords.save_record(work, jobs.record(job))
+            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
+        return on_finish
 
     @app.middleware("http")
     async def no_cache_ui(request: Request, call_next):
         """前端檔每次都向伺服器確認有沒有更新，避免改版後瀏覽器還在用舊的 JS。"""
         response = await call_next(request)
-        if request.url.path == "/" or request.url.path.startswith("/ui/"):
+        if request.url.path == "/" or request.url.path.startswith(("/ui/", "/fekit/")):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
@@ -266,6 +182,30 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         except ValueError:
             body = {}
         return check_connection(ctx.config, (body or {}).get("executor") or None)
+    @app.post("/api/settings/comfyui/test")
+    async def test_comfyui(request: Request):
+        """測 ComfyUI 連線（QQ-4）：位址可以先送進來，不一定存過。"""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        url = str((body or {}).get("base_url") or ctx.config.comfyui_base_url).strip()
+        from vendor.novel_studio import comfy as vendor_comfy
+
+        try:
+            info = vendor_comfy.system_stats(url)
+        except vendor_comfy.ComfyError as error:
+            raise art_gen.ArtGenError("連不上 ComfyUI（%s）：%s" % (url, error)) from error
+        devices = info.get("devices") if isinstance(info, dict) else None
+        first = devices[0] if isinstance(devices, list) and devices else {}
+        return {"ok": True, "base_url": url, "device": str((first or {}).get("name") or ""),
+                "message": "ComfyUI 連得上"}
+
+    @app.get("/api/settings/comfyui/models")
+    def comfyui_models(base_url: str = ""):
+        """ComfyUI 的模型清單（QQ-4）：給設定頁「抓模型清單」與 profile 的下拉用。"""
+        url = (base_url or ctx.config.comfyui_base_url).strip()
+        return art_gen.VendorBackend(url).models()
 
     # ---- 書架
     @app.get("/api/books")
@@ -287,10 +227,6 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     async def import_commit(request: Request):
         body = await request.json()
         return ctx.studio.commit_import(body.get("book_id", ""), body.get("display_name", ""), _payload(body), body.get("opts") or {})
-
-    @app.get("/api/fs/list")
-    def fs_list(path: str = "", dirs_only: bool = False):
-        return list_dir(path, dirs_only)
 
     # ---- 章節、場景、角色、章綱
     @app.get("/api/books/{book_id}/chapters")
@@ -330,6 +266,185 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         body = await request.json()
         return ctx.studio.save_outline(book_id, number, body.get("summary", ""), body.get("plot_points", ""), body.get("cast_names", ""))
 
+    # ---- 漫畫（t2c）：自己的 job 端點，不加進 JOB_KINDS（D6）
+    @app.get("/api/books/{book_id}/comic")
+    def comic_projects(book_id: str):
+        return {"projects": comic.list_projects(book_id, ctx.config)}
+
+    @app.post("/api/books/{book_id}/comic")
+    async def comic_create(book_id: str, request: Request):
+        body = await request.json()
+        return comic.create_project(book_id, str(body.get("project_id") or ""), str(body.get("title") or ""),
+                                    preset=body.get("preset") or None, config=ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}")
+    def comic_overview(book_id: str, project_id: str):
+        return comic.overview(book_id, project_id, ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/bible")
+    def comic_bible_status(book_id: str, project_id: str):
+        return comic.bible_status(book_id, project_id, ctx.config)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/bible")
+    async def comic_bible_build(book_id: str, project_id: str, request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        return comic.bible_cards(book_id, project_id, overwrite=bool(body.get("overwrite")),
+                                 config=ctx.config)
+
+    @app.put("/api/books/{book_id}/comic/{project_id}/bible/{char_id}/t2c")
+    async def comic_bible_t2c_save(book_id: str, project_id: str, char_id: str, request: Request):
+        """漫畫頁的 t2c 人工值：寫回外型卡（正本）之後自動重寫 bible 卡（規格 §3.5、Q1）。"""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        payload = body.get("t2c") if isinstance(body, dict) else None
+        saved = comic.save_appearance_t2c(book_id, char_id, payload, ctx.config)
+        saved["bible"] = comic.bible_cards(book_id, project_id, overwrite=True, config=ctx.config)
+        return saved
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}")
+    def comic_chapter(book_id: str, project_id: str, number: int):
+        return comic.chapter_status(book_id, project_id, number, ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/settings")
+    def comic_settings(book_id: str, project_id: str):
+        return comic.read_settings(book_id, project_id, ctx.config)
+
+    @app.put("/api/books/{book_id}/comic/{project_id}/settings")
+    async def comic_settings_save(book_id: str, project_id: str, request: Request):
+        body = await request.json()
+        return comic.save_settings(book_id, project_id, body.get("lettering") or {}, ctx.config)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/source")
+    async def comic_source(book_id: str, project_id: str, number: int, request: Request):
+        body = await request.json()
+        if body.get("from_book"):
+            return comic.write_source(book_id, project_id, number, ctx.config)
+        return comic.save_source(book_id, project_id, number, str(body.get("text") or ""), ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/storyboard")
+    def comic_storyboard(book_id: str, project_id: str, number: int):
+        return comic.storyboard(book_id, project_id, number, ctx.config)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/compile")
+    async def comic_compile(book_id: str, project_id: str, number: int, request: Request):
+        body = await request.json()
+        return comic.compile_panel(book_id, project_id, number, str(body.get("panel") or ""), ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/panels")
+    def comic_panels(book_id: str, project_id: str, number: int):
+        return comic.panels(book_id, project_id, number, ctx.config)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/pick")
+    async def comic_pick(book_id: str, project_id: str, number: int, request: Request):
+        body = await request.json()
+        return comic.pick(book_id, project_id, number, str(body.get("panel") or ""),
+                          image=body.get("image") or None, clear=bool(body.get("clear")), config=ctx.config)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/pages")
+    def comic_compose(book_id: str, project_id: str, number: int):
+        return comic.compose_pages(book_id, project_id, number, config=ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/pages")
+    def comic_pages(book_id: str, project_id: str, number: int):
+        return comic.pages(book_id, project_id, number, ctx.config)
+
+    # N5 逐句嵌字：letters/chNNN.json 的讀寫與 plan_page() 的位置（第三段）
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/letters")
+    def comic_letters(book_id: str, project_id: str, number: int):
+        return comic.read_letters(book_id, project_id, number, ctx.config)
+
+    @app.put("/api/books/{book_id}/comic/{project_id}/chapter/{number}/letters")
+    async def comic_letters_save(book_id: str, project_id: str, number: int, request: Request):
+        body = await request.json()
+        panels = body.get("panels") if isinstance(body, dict) else None
+        return comic.save_letters(book_id, project_id, number, panels, ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/letters/plan")
+    def comic_letters_plan(book_id: str, project_id: str, number: int, page: int | None = None):
+        return comic.letters_plan(book_id, project_id, number, page, ctx.config)
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/image")
+    def comic_image(book_id: str, project_id: str, number: int, path: str = "", kind: str = "render"):
+        try:
+            target = comic.image_path(book_id, project_id, number, path, kind, ctx.config)
+        except comic.ComicError as exc:
+            raise StudioError(str(exc)) from exc
+        return FileResponse(str(target))
+
+    @app.get("/api/books/{book_id}/comic/{project_id}/chapter/{number}/file")
+    def comic_file(book_id: str, project_id: str, number: int, kind: str = "pdf"):
+        target = comic.export_file(book_id, project_id, number, kind, ctx.config)
+        return FileResponse(str(target), filename=target.name)
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/job")
+    async def comic_job_start(book_id: str, project_id: str, request: Request):
+        body = await request.json()
+        try:
+            stages = comic.check_stages(body.get("stages") or list(comic.STAGES))
+        except comic.ComicError as exc:
+            raise StudioError(str(exc)) from exc
+        numbers = sorted({int(n) for n in body.get("chapters") or []})
+        if not numbers:
+            raise StudioError("choose at least one chapter")
+        work = ctx.studio.work(book_id)
+        config_now = ctx.config
+        executor = str(body.get("executor") or "").strip() or None
+        force = bool(body.get("force"))          # 重跑：覆蓋已存在的階段產出
+        comic.check_stages(stages)
+        comic.open_project(book_id, project_id, config_now)      # 專案不存在就在這裡擋
+
+        def run(j: Any) -> dict[str, Any]:
+            return comic.comic_job(j, book_id, project_id, numbers, stages, config=config_now,
+                                   executor=executor, force=force)
+
+        return jobs.start(book_id, "comic", numbers, executor or config_now.llm_default, run,
+                          save_record(work, config_now)).summary()
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/render")
+    async def comic_render_start(book_id: str, project_id: str, number: int, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        work = ctx.studio.work(book_id)
+        config_now = ctx.config
+        comic.open_project(book_id, project_id, config_now)      # 專案不存在就在這裡擋
+        preset = str(body.get("preset") or "").strip() or None
+        force = bool(body.get("force"))
+        page, panel, candidates = render_subset(body)      # 第四段：只補某一頁／某一格與候選張數
+        more = body.get("more")                            # 「加畫 N 張」：每格再畫 N 個沒用過的 seed
+        if more is not None:
+            try:
+                more = int(more)
+            except (TypeError, ValueError) as error:
+                raise comic.ComicError("more 要是整數（加畫幾張）") from error
+            if more < 1:
+                raise comic.ComicError("more 至少 1")
+
+        def run(j: Any) -> dict[str, Any]:
+            return comic.comic_render_job(j, book_id, project_id, [int(number)], preset=preset, force=force,
+                                          page=page, panel=panel, candidates=candidates, more=more,
+                                          config=config_now)
+
+        return jobs.start(book_id, "comic", [int(number)], "ComfyUI", run,
+                          save_record(work, config_now)).summary()
+
+    @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/renders/delete")
+    async def comic_renders_delete(book_id: str, project_id: str, number: int, request: Request):
+        """刪掉候選圖；已選中的那張由後端保護，不能刪。"""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        names = (body or {}).get("names")
+        if not isinstance(names, list) or not names:
+            raise comic.ComicError("要給 names（要刪的候選圖檔名清單）")
+        return comic.delete_renders(book_id, project_id, number, names, ctx.config)
+
     # ---- 背景任務
     @app.post("/api/books/{book_id}/jobs")
     async def start_job(book_id: str, request: Request):
@@ -350,57 +465,35 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         force = bool(body.get("force"))
         config_now = ctx.config
         chunk_chars = chunk_chars_for(config_now, executor)
-        job = Job(book_id, kind, numbers, executor or config_now.llm_default)
         lang = studio.book_json(book_id).get("lang", "zh-TW")
 
-        def run(j: Job) -> None:
-            hooks = j.hooks()
+        def run(j: Any) -> dict[str, Any]:
+            hooks = jobs.hooks(j)
             if kind == "extract":
-                j.summary = extract_book(work, numbers, llm, book_id, lang, force, j.log.append, lambda: j.stop_requested,
-                                         hooks=hooks, on_chapter=j.set_item)
-                return
+                return extract_book(work, numbers, llm, book_id, lang, force, j.say, lambda: j.stop_requested,
+                                    hooks=hooks, on_chapter=lambda n, state, note: jobs.item(j, n, state, note))
             outlines, notes, roles = studio.annotation_context(book_id)
             done, failed = [], []
             for number in numbers:
                 if j.stop_requested:
-                    j.log.append("stopped")
+                    j.say("stopped")
                     break
-                j.set_item(number, "running")
+                jobs.item(j, number, "running")
                 result = annotate_chapter_to_disk(config_now, work, number, llm, book_id, lang, outlines, notes, roles,
-                                                  force=force, log=j.log.append, hooks=hooks, chunk_chars=chunk_chars)
+                                                  force=force, log=j.say, hooks=hooks, chunk_chars=chunk_chars)
                 note = f"{len(result.scene_doc['scenes'])} scenes" if result.scene_doc else result.note
-                j.set_item(number, {"ok": "done", "skip": "skipped", "missing": "error", "error": "error", "stopped": "stopped"}.get(result.status, "error"), note)
+                jobs.item(j, number, {"ok": "done", "skip": "skipped", "missing": "error", "error": "error", "stopped": "stopped"}.get(result.status, "error"), note)
                 (done if result.status == "ok" else failed if result.status in ("error", "missing") else []).append(number)
-            j.summary = {"done": done, "failed": failed}
+            return {"done": done, "failed": failed}
 
-        def save_record(j: Job) -> None:
-            ctx_config = config_now
-            ctx_config.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
+        return jobs.start(book_id, kind, numbers, executor or config_now.llm_default, run,
+                          save_record(work, config_now)).summary()
 
-        return jobs.start(job, run, save_record).public()
-
-    @app.get("/api/jobs/active")
-    def active_job():
-        job = jobs.latest()
-        return {"job": job.public() if job else None}
-
-    @app.get("/api/jobs/{job_id}")
-    def job(job_id: str, since: int = 0, stream_since: int | None = None):
-        item = jobs.items.get(job_id)
-        if item is None:
-            raise StudioError("job not found")
-        return item.public(since, stream_since)
-
-    @app.post("/api/jobs/{job_id}/stop")
-    def stop_job(job_id: str):
-        item = jobs.items.get(job_id)
-        if item is None:
-            raise StudioError("job not found")
-        item.stop_requested = True
-        item.log.append("stop requested ...")
-        return {"ok": True}
+    @app.get("/api/books/{book_id}/jobs/active")
+    def active_book_job(book_id: str):
+        """重新整理後，讓這一頁接回自己書上還在跑的任務（素材／音樂／語音／輸出頁用）。"""
+        job = jobs.latest_for(book_id)
+        return {"job": job.summary() if job is not None else None}
 
     # ---- 任務紀錄
     @app.get("/api/books/{book_id}/job-records")
@@ -497,7 +590,7 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.get("/api/books/{book_id}/art/style")
     def art_get_style(book_id: str):
-        return art_studio.get_style(art_work(book_id))
+        return art_studio.get_style(art_work(book_id), ctx.config)
 
     @app.put("/api/books/{book_id}/art/style")
     async def art_put_style(book_id: str, request: Request):
@@ -533,24 +626,18 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         candidates = int(body["candidates"]) if body.get("candidates") else None
         regenerate = bool(body.get("regenerate"))
         backend = comfy_factory() if comfy_factory else art_gen.VendorBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
-                                     n=event.get("n"), of=event.get("of"), event=event["event"])
-            j.summary = art_studio.run_generation(config_now, work, backend, only=only, regenerate=regenerate, candidates=candidates,
-                                                  should_stop=lambda: j.stop_requested, on_progress=progress, log=j.log.append)
-            if j.summary.get("stopped"):
-                j.stop_requested = True  # 出圖途中被中斷，任務狀態記為「已停止」
+                jobs.update(j, phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
+                            n=event.get("n"), of=event.get("of"), event=event["event"])
+            result = art_studio.run_generation(config_now, work, backend, only=only, regenerate=regenerate, candidates=candidates,
+                                               should_stop=lambda: j.stop_requested, on_progress=progress, log=j.say)
+            if result.get("stopped"):
+                j.request_stop()  # 出圖途中被中斷，任務狀態記為「已停止」
+            return result
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     # ---- 外觀（外型卡、頭像、畫風庫、wildcard）
     def wild_library() -> dict[str, list[str]]:
@@ -569,6 +656,10 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         except art_gen.ArtGenError:
             pass
         return card
+
+    @app.get("/api/books/{book_id}/art/cards/{char_id}/check")
+    def cards_check(book_id: str, char_id: str):
+        return comic.appearance_card_check(book_id, char_id, ctx.config)
 
     @app.post("/api/books/{book_id}/art/cards/roll")
     async def cards_roll(book_id: str, request: Request):
@@ -594,26 +685,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
             raise StudioError("張數必須在 1 到 16 之間")
         wild, enabled = wild_library(), art_cards.load_enabled(work)
         backend = comfy_factory() if comfy_factory else art_gen.VendorBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event.get("asset_id") or event.get("char_id"), index=event["index"],
-                                     total=event["total"], n=event.get("n"), of=event.get("of"), event=event["event"])
-            j.summary = art_cards_studio.run_cards_generation(
+                jobs.update(j, phase="streaming", asset=event.get("asset_id") or event.get("char_id"), index=event["index"],
+                            total=event["total"], n=event.get("n"), of=event.get("of"), event=event["event"])
+            result = art_cards_studio.run_cards_generation(
                 config_now, work, backend, book_id=book_id, lang=lang, char_id=char_id, headshot=headshot, sprite=sprite,
                 candidates=candidates, wild=wild, enabled=enabled, should_stop=lambda: j.stop_requested,
-                on_progress=progress, log=j.log.append)
-            if j.summary.get("stopped"):
-                j.stop_requested = True
+                on_progress=progress, log=j.say)
+            if result.get("stopped"):
+                j.request_stop()
+            return result
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/art/cards/{char_id}/draft")
     async def cards_draft(book_id: str, char_id: str, request: Request):
@@ -657,23 +742,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.post("/api/books/{book_id}/art/styles/upload")
     async def styles_upload(book_id: str, request: Request):
-        """上傳畫風表：請求本體就是 .xlsx 檔案內容，檔名在 ``X-Filename`` 標頭。"""
-        name = unquote(request.headers.get("x-filename", ""))
-        if not name.lower().endswith(art_cards_studio.XLSX_SUFFIXES):
-            raise StudioError("只能匯入 .xlsx 畫風表")
-        data = await request.body()
-        if not data:
-            raise StudioError("檔案是空的")
-        scratch = ctx.config.project_root / "config" / "_upload_styles.xlsx"
-        ctx.config.assert_writable(scratch)
-        scratch.parent.mkdir(parents=True, exist_ok=True)
-        scratch.write_bytes(data)
+        """上傳畫風表：請求本體就是 .xlsx 檔案內容，檔名在 ``X-Filename`` 標頭。
+
+        大小上限走 fekit 的 ``save_upload``：先看 ``Content-Length``，再邊收邊算，
+        超標回 413 而不是把整個本體讀進記憶體（計畫 §10.1）。
+        """
+        folder = ctx.config.assert_writable(ctx.config.project_root / "config")
+        folder.mkdir(parents=True, exist_ok=True)
+        saved = await save_upload(request, folder, max_bytes=STYLES_MAX_BYTES, exts=art_cards_studio.XLSX_SUFFIXES)
         try:
-            count = art_cards.import_styles(ctx.config.assert_writable, scratch, art_cards_studio.catalog_path(ctx.config.project_root))
+            count = art_cards.import_styles(ctx.config.assert_writable, saved.path, art_cards_studio.catalog_path(ctx.config.project_root))
         except zipfile.BadZipFile as exc:
             raise StudioError("這不是有效的 xlsx 檔案") from exc
         finally:
-            scratch.unlink(missing_ok=True)
+            saved.path.unlink(missing_ok=True)
         return {"count": count}
 
     @app.post("/api/books/{book_id}/art/candidates/delete")
@@ -747,27 +829,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         candidates = int(body.get("candidates") or 1)
         regenerate = bool(body.get("regenerate"))
         backend = audio_backend_factory() if audio_backend_factory else audio_gen.VendorAudioBackend(config_now.comfyui_base_url)
-        job = Job(book_id, ART_JOB_KIND, [], "ComfyUI")
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    j.current.update(phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
-                                     n=event.get("n"), of=event.get("of"), event=event["event"])
+                jobs.update(j, phase="streaming", asset=event["asset_id"], index=event["index"], total=event["total"],
+                            n=event.get("n"), of=event.get("of"), event=event["event"])
             report = audio_gen.generate(config_now, work, backend, candidates=candidates, only=only, regenerate=regenerate,
                                         should_stop=lambda: j.stop_requested, progress=progress)
             for asset_id, reason in report.failed.items():
-                j.log.append(f"failed: {asset_id}: {reason}")
-            j.summary = {"generated": report.generated, "skipped": report.skipped, "failed": report.failed, "stopped": report.stopped}
+                j.say(f"failed: {asset_id}: {reason}")
             if report.stopped:
-                j.stop_requested = True
+                j.request_stop()
+            return {"generated": report.generated, "skipped": report.skipped, "failed": report.failed, "stopped": report.stopped}
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, ART_JOB_KIND, [], "ComfyUI", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/art/audio/select")
     async def audio_select(book_id: str, request: Request):
@@ -812,45 +887,38 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         design_only = bool(body.get("design_only"))
         config_now = ctx.config
         backend = tts_backend_factory() if tts_backend_factory else voice_gen.VendorTtsBackend(config_now.comfyui_base_url)
-        job = Job(book_id, "tts", chapters, tts_executor(doc))
 
-        def run(j: Job) -> None:
+        def run(j: Any) -> dict[str, Any]:
             def progress(event: dict[str, Any]) -> None:
-                with j.lock:
-                    update = {"phase": "streaming", "event": event.get("event"), "index": event.get("index"),
-                              "total": event.get("total"), "line_id": event.get("line_id"),
-                              "speaker": event.get("speaker"), "char_id": event.get("char_id")}
-                    j.current.update({k: v for k, v in update.items() if v is not None})
-                    line_id = event.get("line_id")
-                    if line_id:
-                        chapter = int(voice_lines.chapter_of(line_id)[2:])
-                        if chapter in j.items:
-                            j.items[chapter]["note"] = line_id
-                    if event.get("event") == "voice":
-                        chapter = int(voice_lines.chapter_of(str(event["line_id"]))[2:])
-                        if chapter in j.items:
-                            j.items[chapter]["status"] = "running"
+                update = {"phase": "streaming", "event": event.get("event"), "index": event.get("index"),
+                          "total": event.get("total"), "line_id": event.get("line_id"),
+                          "speaker": event.get("speaker"), "char_id": event.get("char_id")}
+                jobs.update(j, {k: v for k, v in update.items() if v is not None})
+                line_id = event.get("line_id")
+                if not line_id:
+                    return
+                chapter = int(voice_lines.chapter_of(line_id)[2:])
+                if chapter not in chapters:
+                    return
+                jobs.item(j, chapter, note=line_id)
+                if event.get("event") == "voice":
+                    jobs.item(j, chapter, "running")
             report = voice_gen.generate(
                 config_now, work, backend, chapters=chapters, only=only, regenerate=regenerate,
                 include_narration=bool(body.get("include_narration")), design_only=design_only,
                 should_stop=lambda: j.stop_requested, progress=progress,
                 runner=tts_runner or voice_gen.run_ffmpeg)
             for line_id, reason in report.failed.items():
-                j.log.append(f"failed: {line_id}: {reason}")
-            for chapter in j.chapters:
+                j.say(f"failed: {line_id}: {reason}")
+            for chapter in chapters:
                 prefix = f"ch{chapter:03d}_"
-                j.items[chapter]["status"] = "error" if any(x.startswith(prefix) for x in report.failed) else "done"
-            j.summary = {"generated": report.generated, "skipped": report.skipped, "failed": report.failed,
-                         "designed": report.designed, "unvoiced": report.unvoiced, "stopped": report.stopped}
+                jobs.item(j, chapter, "error" if any(x.startswith(prefix) for x in report.failed) else "done")
             if report.stopped:
-                j.stop_requested = True
+                j.request_stop()
+            return {"generated": report.generated, "skipped": report.skipped, "failed": report.failed,
+                    "designed": report.designed, "unvoiced": report.unvoiced, "stopped": report.stopped}
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, "tts", chapters, tts_executor(doc), run, save_record(work, config_now)).summary()
 
     @app.get("/api/books/{book_id}/tts")
     def tts_overview(book_id: str):
@@ -953,17 +1021,11 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     def start_export_job(book_id: str, label: str, work_fn: Callable[[], dict[str, Any]]):
         work = art_work(book_id)
         config_now = ctx.config
-        job = Job(book_id, label, [], "Ren'Py")
 
-        def run(j: Job) -> None:
-            j.summary = work_fn()
+        def run(_job: Any) -> dict[str, Any]:
+            return work_fn()
 
-        def save_record(j: Job) -> None:
-            config_now.assert_writable(work / jobrecords.JOBS_DIR_NAME / f"{j.id}.json")
-            jobrecords.save_record(work, j.record())
-            jobrecords.prune_records(work, JOB_RECORDS_KEEP)
-
-        return jobs.start(job, run, save_record).public()
+        return jobs.start(book_id, label, [], "Ren'Py", run, save_record(work, config_now)).summary()
 
     @app.post("/api/books/{book_id}/export/run")
     async def export_run(book_id: str, request: Request):
@@ -1014,9 +1076,12 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.get("/")
     def index():
-        return FileResponse(UI_DIR / "index.html")
+        return fe.page(TEMPLATES / "index.html")
 
     app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
+    for sub in ("css", "fe", "vendor"):
+        if (FEKIT_DIR / sub).is_dir():
+            app.mount("/fekit/" + sub, StaticFiles(directory=FEKIT_DIR / sub), name="fekit-" + sub)
     return app
 
 
@@ -1029,40 +1094,6 @@ def _payload(body: dict[str, Any]) -> dict[str, Any]:
             raise StudioError(f"not a supported file: {raw}")
         payload["files"].append({"name": path.name, "data": base64.b64encode(path.read_bytes()).decode("ascii")})
     return payload
-
-
-def list_dir(path: str, dirs_only: bool = False) -> dict[str, Any]:
-    """列資料夾（只列名稱）。空路徑回傳常用起點。"""
-    home = Path.home()
-    roots = [{"name": "home", "path": str(home)}]
-    for sub in ("Documents", "Desktop", "Downloads"):
-        if (home / sub).is_dir():
-            roots.append({"name": sub, "path": str(home / sub)})
-    if os.name == "nt":
-        import string
-        roots += [{"name": f"{c}:", "path": f"{c}:\\"} for c in string.ascii_uppercase if Path(f"{c}:\\").exists()]
-    out: dict[str, Any] = {"roots": roots, "path": "", "parent": None, "dirs": [], "files": []}
-    if not path:
-        return out
-    p = Path(path).expanduser()
-    while not p.is_dir():
-        if p.parent == p:
-            return out
-        p = p.parent
-    try:
-        names = sorted(os.listdir(p), key=str.lower)
-    except OSError as exc:
-        raise StudioError(f"cannot read folder: {exc}") from exc
-    for name in names:
-        if name.startswith((".", "$")):
-            continue
-        full = p / name
-        if full.is_dir():
-            out["dirs"].append(name)
-        elif not dirs_only and full.suffix.lower() in ALLOWED_EXTS:
-            out["files"].append(name)
-    out.update(path=str(p), parent=str(p.parent) if p.parent != p else None, sep=os.sep)
-    return out
 
 
 def main(argv: list[str] | None = None) -> int:

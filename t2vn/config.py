@@ -57,6 +57,9 @@ class Config:
     llm_thinking: str = "off"
     llm_max_output: int = 32768
     comfyui_base_url: str = "http://127.0.0.1:8188"
+    # 出圖 profile 的正本（一份同時給 VN 與漫畫用）：profile 名稱 → {kind, workflow, models, negative, presets}
+    comfy_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    comfy_default_profile: str = ""
     works_dir_override: Path | None = None  # 作品（匯入、標註、原型）的存放位置；沒設就是 <project_root>/works
     server_port: int = 7866
     annotate_chunk_chars: int = 0  # 0＝自動（上限 15000 字，再依執行者上下文長度調整）
@@ -146,6 +149,47 @@ def load_config(path: str | Path | None = None) -> Config:
     return parse_config(raw, base_dir=cfg_path.parent)
 
 
+COMFY_KINDS = ("anima", "moss")
+
+
+def _parse_comfy_profiles(value: Any) -> dict[str, dict[str, Any]]:
+    """comfyui.profiles：出圖 profile 的正本（VN 與漫畫共用）。空白／沒寫＝空字典，呼叫端各自 fallback。
+
+    每個 profile 收 kind（anima／moss）、workflow（空＝內建）、models（unet／clip／vae）、negative、presets。
+    沒有 presets 沒關係——漫畫端會用 vendored 的同名 profile 當底再疊上去。
+    """
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("comfyui.profiles must be a mapping")
+    out: dict[str, dict[str, Any]] = {}
+    for name, entry in value.items():
+        key = str(name).strip()
+        if not key or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", key):
+            raise ConfigError("comfyui.profiles 的名稱只能用 a-z、0-9、底線、連字號（目前是 %r）" % name)
+        if not isinstance(entry, dict):
+            raise ConfigError("comfyui.profiles.%s must be a mapping" % key)
+        kind = str(entry.get("kind") or "anima").strip().lower()
+        if kind not in COMFY_KINDS:
+            raise ConfigError("comfyui.profiles.%s.kind 只能是 anima 或 moss（目前是 %r）" % (key, entry.get("kind")))
+        models = entry.get("models") or {}
+        if not isinstance(models, dict):
+            raise ConfigError("comfyui.profiles.%s.models must be a mapping" % key)
+        presets = entry.get("presets") if isinstance(entry.get("presets"), dict) else {}
+        default_preset = str(entry.get("default_preset") or "").strip()
+        if default_preset and default_preset not in presets:
+            raise ConfigError("comfyui.profiles.%s.default_preset「%s」不在 presets 裡（目前有：%s）"
+                              % (key, default_preset, "、".join(presets) or "沒有"))
+        out[key] = {
+            "kind": kind,
+            "workflow": str(entry.get("workflow") or ""),
+            "models": {k: str(models.get(k) or "") for k in ("unet", "clip", "vae")},
+            "negative": str(entry.get("negative") or ""),
+            "default_preset": default_preset,
+            "presets": presets,
+        }
+    return out
+
 def parse_config(raw: Any, base_dir: str | Path | None = None) -> Config:
     """驗證已解析的設定內容並轉成 Config。``base_dir`` 用來決定 project_root 的預設值。"""
     if not isinstance(raw, dict):
@@ -174,6 +218,11 @@ def parse_config(raw: Any, base_dir: str | Path | None = None) -> Config:
     comfy = raw.get("comfyui") or {}
     if not isinstance(comfy, dict):
         raise ConfigError("comfyui must be a mapping")
+    comfy_profiles = _parse_comfy_profiles(comfy.get("profiles"))
+    comfy_default = str(comfy.get("default_profile") or "").strip()
+    if comfy_default and comfy_default not in comfy_profiles:
+        raise ConfigError("comfyui.default_profile「%s」不在 comfyui.profiles 裡（目前有：%s）"
+                          % (comfy_default, "、".join(comfy_profiles) or "沒有"))
     llm_section = executors.normalize_llm_section(raw.get("llm"))
     default_executor = executors.resolve_executor(executors.build_providers(llm_section["providers"]), llm_section["default"])
 
@@ -211,6 +260,8 @@ def parse_config(raw: Any, base_dir: str | Path | None = None) -> Config:
         llm_thinking=executors.structured_effort(default_executor),
         llm_max_output=int(default_executor.get("max_output") or 32768),
         comfyui_base_url=str(comfy.get("base_url") or "http://127.0.0.1:8188"),
+        comfy_profiles=comfy_profiles,
+        comfy_default_profile=comfy_default,
         works_dir_override=Path(str(works_raw)) if works_raw else None,
         server_port=port,
         annotate_chunk_chars=chunk_chars,

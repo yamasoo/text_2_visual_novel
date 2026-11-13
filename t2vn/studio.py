@@ -18,6 +18,8 @@ from .errors import ConfigError, SourceError, T2vnError
 from .schema_check import PLAYER_ID, check_scene_links, validate_data
 
 STATUS_VALUES = ("draft", "reviewed")
+# 新書預設的語音引擎（見 Studio._ensure_cast_voice）：speaker_id 走 sherpa-onnx。
+NEW_BOOK_ENGINE = "sherpa-onnx"
 _REVIEW_ROW = re.compile(r"^\|\s*sc(\d+)-(\d+)\s*\|.*\|\s*\?\s*\|\s*$")
 _POINTER_LINE = re.compile(r"^/scenes/(\d+)(?:/lines/(\d+))?")
 
@@ -131,7 +133,22 @@ class Studio:
             c["title"] = titles.get(c["no"], c["title"])
             c["source_file"] = ", ".join(source_names)[:200]
         index = ingest.write_book(work, book_id, display_name or book_id, lang, chosen, source)
+        self._ensure_cast_voice(book_id, work)
         return {"book_id": book_id, "chapters": len(index["chapters"])}
+
+    def _ensure_cast_voice(self, book_id: str, work: Path) -> None:
+        """建書時先寫一份最小 cast_voice.json（引擎預設 sherpa-onnx）。
+
+        沒有這個檔時語音頁的 roster／lines 算得出來（見 voice_gen.overview），但「套用模型」的存檔
+        會因為 characters 是空的被擋下；先放一個空殼，使用者就能直接配聲線。
+        """
+        from . import voice_lines
+
+        if voice_lines.cast_voice_path(work).exists():
+            return
+        doc = {"schema_version": voice_lines.SCHEMA_VERSION, "book_id": book_id,
+               "engine": NEW_BOOK_ENGINE, "characters": {}}
+        voice_lines.save_cast_voice(self.config, work, doc)
 
     def import_library_book(self, dir_name: str, book_id: str, display_name: str, lang: str = "zh-TW") -> dict[str, Any]:
         """把書庫（唯讀）的書正規化進 works/<book_id>/。"""
@@ -157,6 +174,7 @@ class Studio:
             cast = {"schema_version": "0.1", "book_id": book_id, "characters": {
                 PLAYER_ID: {"names": {lang: "主角（內心）"}, "aliases": [], "role": "player"}}}
             self._write(work / "cast.json", _dump(cast))
+        self._ensure_cast_voice(book_id, work)
         return {"book_id": book_id, "chapters": len(index["chapters"])}
 
     # ------------------------------------------------------------ 章節

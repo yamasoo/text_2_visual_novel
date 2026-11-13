@@ -155,6 +155,7 @@ label ch001_sc01:
 
 - `--project` 可以在專案資料夾以外（使用者明示的目的地）；仍禁止寫進唯讀目錄（書庫、參考來源）。專案裡沒有 `game/` 會報錯並提示先用啟動器建立。
 - `--placeholders`：匯出後順便呼叫佔位素材產生器；不論有沒有給，結尾都會跑前置檢查並印出結果（有 error 結束碼 1）。
+- **缺背景圖會中止匯出**（2026-11-11）：`scene <bg>` 一定會寫，而 `vn_images.rpy` 的 `image` 一律指向 `images/bg/<id>.png`，缺檔只會在 Ren'Py 跑到那一景時才炸。所以匯出在寫任何檔案之前先比對 `vn_export.json` 的 `backgrounds[].present`，缺就 `ExportError` 並列出 asset_id（超過 10 個只列前 10 個），一個 `.rpy` 都不寫。要硬過去就用 `--placeholders`（補佔位圖）。立繪不受此限：`sprite_fallback` 本來就會退到 neutral／頭像／純文字角色。
 - `fade_in` 前面若有 `fade_out`：先還原該場背景與立繪再 `with fade`（只寫 `with fade` 會停在黑場）。黑場期間不顯示立繪。
 - 音訊副檔名依實際檔案（`.ogg .opus .mp3 .wav .flac`），`vn_export.json` 的 `file` 照實填；找不到檔時只留註解。場景沒寫 `bgm`／`ambience` 這個 key ＝ 沿用上一場。
 - `next` 為 `end_*` → `jump vn_end`；`next` 指向沒有一起匯出的場 → 警告並 `jump vn_end`；沒有 `next` → 下一個匯出的章，沒有則 `vn_end`。

@@ -20,7 +20,20 @@ from .errors import JobStopped, T2vnError
 from .sprite_cutout import cutout
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKFLOW = REPO_ROOT / "config" / "comfy" / "anima.api.json"
+WORKFLOWS = {
+    "anima": REPO_ROOT / "config" / "comfy" / "anima.api.json",
+    "moss": REPO_ROOT / "config" / "comfy" / "moss.api.json",
+}
+KIND_LABELS = {"anima": "Anima", "moss": "MOSS-Image"}
+DEFAULT_WORKFLOW = WORKFLOWS["anima"]   # 舊呼叫端（明確指定 workflow 的測試與工具）沿用
+
+
+def workflow_for(kind: str) -> Path:
+    """這一種出圖模型的 workflow 檔；不認得的 kind 直接講清楚。"""
+    key = str(kind or "anima").strip().lower()
+    if key not in WORKFLOWS:
+        raise ArtGenError("不認得的出圖模型「%s」；只接受 %s" % (kind, "、".join(WORKFLOWS)))
+    return WORKFLOWS[key]
 CANDIDATES_DIR = "_candidates"
 DEFAULT_CANDIDATES = 4
 GEN_KINDS = ("bg", "sprite", "headshot")
@@ -48,16 +61,19 @@ class VendorBackend:
 
         self.comfy = comfy
         self.base_url = base_url
-        self.workflow_path = Path(workflow_path) if workflow_path else DEFAULT_WORKFLOW
-        self._workflow: dict[str, Any] | None = None
+        self.workflow_path = Path(workflow_path) if workflow_path else None   # 明確指定就一律用這一份
+        self._workflows: dict[str, dict[str, Any]] = {}
 
-    def _wf(self) -> dict[str, Any]:
-        if self._workflow is None:
+    def _wf(self, kind: str = "anima", workflow: str | None = None) -> dict[str, Any]:
+        """這一種模型的 workflow（同一個後端可以換 kind；profile 指定了檔案就用那一份）。"""
+        path = self.workflow_path or (Path(workflow).expanduser() if workflow else workflow_for(kind))
+        key = str(path)
+        if key not in self._workflows:
             try:
-                self._workflow = self.comfy.load_workflow(str(self.workflow_path))
+                self._workflows[key] = self.comfy.load_workflow(key)
             except (self.comfy.ComfyError, OSError) as exc:
-                raise ArtGenError(f"cannot load workflow {self.workflow_path}: {exc}") from exc
-        return self._workflow
+                raise ArtGenError(f"cannot load workflow {path}: {exc}") from exc
+        return self._workflows[key]
 
     def models(self) -> dict[str, list[str]]:
         try:
@@ -66,10 +82,14 @@ class VendorBackend:
             raise ArtGenError(str(exc)) from exc
 
     def prepare(self, profile: dict[str, Any], positive: str, negative: str, seed: int, width: int, height: int) -> Any:
+        kind = str(profile.get("kind") or "anima")
         try:
-            return self.comfy.prepare(self._wf(), profile, positive, negative, seed, width, height, count=1, keep_output=False)
+            wf, out_id = self.comfy.prepare(self._wf(kind, profile.get("workflow")), profile, positive, negative,
+                                            seed, width, height, count=1, keep_output=False)
         except self.comfy.ComfyError as exc:
             raise ArtGenError(str(exc)) from exc
+        _apply_preset(wf, profile.get("preset") or {})
+        return wf, out_id
 
     def run(self, job: Any, should_stop: Callable[[], bool]) -> list[bytes]:
         wf, out_id = job
@@ -205,24 +225,123 @@ def list_candidates(work: Path, asset_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def resolve_profile(backend: ComfyBackend, art: dict[str, Any]) -> dict[str, Any]:
-    """出圖設定檔：``art["comfy"]`` 的 unet／clip／vae／loras；空白的模型向 ComfyUI 查檔名後依檔名猜（Anima）。"""
+def resolve_profile(backend: ComfyBackend, art: dict[str, Any], config: Any = None) -> dict[str, Any]:
+    """出圖設定檔。
+
+    主路徑（QQ-3）：``art["comfy"]["profile"]`` → 讀宿主的 profile 正本 ``comfyui.profiles``；
+    那一份同時給漫畫線用（QQ-2），所以模型改一次兩端都跟著變。這本書沒選 profile 就用設定的預設 profile；
+    連預設都沒有才走相容路徑（``art["comfy"]["kind"]``，預設 anima）。
+    留空的模型一律用該 kind 的關鍵字向 ComfyUI 查檔名後猜。
+    """
     settings = dict(art.get("comfy") or {})
-    profile: dict[str, Any] = {"kind": "anima", "unet": settings.get("unet", ""), "clip": settings.get("clip", ""),
-                               "vae": settings.get("vae", ""), "loras": settings.get("loras") or []}
+    profiles = dict(getattr(config, "comfy_profiles", None) or {})
+    name = str(settings.get("profile") or "").strip()
+    if not name and profiles:
+        # 使用者 2026-11-12 指示：不管漫畫還是 VN 都用設定頁的預設 profile（原 D33 是不跟隨）。
+        name = str(getattr(config, "comfy_default_profile", "") or "").strip()
+    if name:
+        if name not in profiles:
+            raise ArtGenError("找不到出圖 profile「%s」；設定頁目前有：%s"
+                              % (name, "、".join(profiles) or "（沒有）"))
+        spec = profiles[name]
+        kind = str(spec.get("kind") or "anima")
+        models = spec.get("models") or {}
+        profile: dict[str, Any] = {"kind": kind, "profile": name,
+                                   "unet": str(models.get("unet") or ""), "clip": str(models.get("clip") or ""),
+                                   "vae": str(models.get("vae") or ""), "loras": settings.get("loras") or []}
+        if spec.get("workflow"):
+            profile["workflow"] = str(spec["workflow"])
+        preset_name = str(spec.get("default_preset") or "").strip()
+        preset = dict((spec.get("presets") or {}).get(preset_name) or {}) if preset_name else {}
+        profile["preset_name"] = preset_name
+        profile["preset"] = preset
+        loras = list(settings.get("loras") or [])
+        if preset.get("lora"):
+            loras = [{"name": str(preset["lora"]), "on": True,
+                      "strength": float(preset.get("lora_strength") or 1.0), "trigger": ""}]
+        profile["loras"] = loras
+    else:
+        kind = str(settings.get("kind") or "anima").strip().lower()
+        if kind not in WORKFLOWS:
+            raise ArtGenError("不認得的出圖模型「%s」；只接受 %s" % (settings.get("kind"), "、".join(WORKFLOWS)))
+        profile = {"kind": kind, "unet": settings.get("unet", ""), "clip": settings.get("clip", ""),
+                   "vae": settings.get("vae", ""), "loras": settings.get("loras") or []}
     if not all(profile[k] for k in ("unet", "clip", "vae")):
         lists = backend.models()
         from vendor.novel_studio import comfy
 
-        guess = comfy.guess_models("anima", lists)
+        guess = comfy.guess_models(kind, lists)
         for key in ("unet", "clip", "vae"):
             profile[key] = profile[key] or guess.get(key, "")
         missing = [k for k in ("unet", "clip", "vae") if not profile[k]]
         if missing:
-            raise ArtGenError("找不到 Anima 的模型檔（" + ", ".join(missing) + "）。請確認檔案已放進 ComfyUI 的 models 資料夾，"
+            raise ArtGenError("找不到 %s 的模型檔（" % KIND_LABELS[kind] + ", ".join(missing) + "）。請確認檔案已放進 ComfyUI 的 models 資料夾，"
                               "或在畫風設定的 comfy 區填入檔名。ComfyUI 目前有：" + json.dumps(lists, ensure_ascii=False)[:400])
     return profile
 
+
+def _kind_mismatch(kind: str, models: dict[str, str]) -> str:
+    """kind 與模型檔名互相矛盾時給一句人話（例：profile 名叫 moss，kind 卻是 anima）。
+
+    這種狀態不會報錯——workflow 照 kind 走、模型檔照 models 載，結果就是「拿 MOSS 的模型配 Anima 的 workflow」。
+    """
+    unet = str((models or {}).get("unet") or "").lower()
+    if not unet:
+        return ""
+    if kind == "anima" and ("moss" in unet) and ("anima" not in unet):
+        return "kind 是 anima，但 unet 看起來是 MOSS 的模型檔；請把這個 profile 的 kind 改成 moss（否則會用 Anima 的 workflow 載 MOSS 模型）"
+    if kind == "moss" and ("anima" in unet) and ("moss" not in unet):
+        return "kind 是 moss，但 unet 看起來是 Anima 的模型檔；請把這個 profile 的 kind 改成 anima"
+    return ""
+
+def _apply_preset(wf: dict[str, Any], preset: dict[str, Any] | None) -> None:
+    """把 profile 的 preset（steps／cfg／sampler／scheduler）套到 sampler 節點。
+
+    vendor/novel_studio 的 `prepare()` 只換模型、LoRA、seed、尺寸與提示詞，**不碰取樣參數**；
+    所以要「4 步 turbo」這種預設得由宿主自己套（t2c 那一份 comfy 有 apply_preset，novel_studio 沒有）。
+    """
+    if not preset:
+        return
+    mapping = (("steps", "steps"), ("cfg", "cfg"), ("sampler", "sampler_name"), ("scheduler", "scheduler"))
+    for node in wf.values():
+        if node.get("class_type") not in ("KSampler", "KSamplerAdvanced"):
+            continue
+        inputs = node.setdefault("inputs", {})
+        for key, target in mapping:
+            value = preset.get(key)
+            if value not in (None, ""):
+                inputs[target] = value
+
+
+def describe_profile(art: dict[str, Any], config: Any = None) -> dict[str, Any]:
+    """這一本書「實際會用哪一組出圖設定」（不連 ComfyUI，給介面顯示用）。
+
+    回傳 source＝profile（這本書選了宿主 profile）／legacy（走相容路徑，預設 anima）／missing（選了但設定頁沒有）。
+    ``auto`` 是留空、出圖時才向 ComfyUI 猜的欄位。
+    """
+    settings = dict(art.get("comfy") or {})
+    profiles = dict(getattr(config, "comfy_profiles", None) or {})
+    name = str(settings.get("profile") or "").strip()
+    inherited = not name and bool(profiles and getattr(config, "comfy_default_profile", ""))
+    if inherited:
+        name = str(getattr(config, "comfy_default_profile", "") or "").strip()
+    if name:
+        spec = profiles.get(name)
+        if spec is None:
+            return {"source": "missing", "profile": name, "kind": "", "models": {}, "preset": "",
+                    "auto": [], "inherited": False, "message": "設定頁沒有這個 profile"}
+        models = {k: str((spec.get("models") or {}).get(k) or "") for k in ("unet", "clip", "vae")}
+        kind = str(spec.get("kind") or "anima")
+        preset_name = str(spec.get("default_preset") or "")
+        preset = dict((spec.get("presets") or {}).get(preset_name) or {}) if preset_name else {}
+        return {"source": "profile", "profile": name, "kind": kind, "inherited": inherited,
+                "models": models, "preset": preset_name, "preset_steps": preset.get("steps"),
+                "auto": [k for k, v in models.items() if not v],
+                "message": _kind_mismatch(kind, models)}
+    kind = str(settings.get("kind") or "anima").strip().lower()
+    models = {k: str(settings.get(k) or "") for k in ("unet", "clip", "vae")}
+    return {"source": "legacy", "profile": "", "kind": kind, "inherited": False, "models": models, "preset": "",
+            "auto": [k for k, v in models.items() if not v], "message": _kind_mismatch(kind, models)}
 
 def pending_assets(manifest: dict[str, Any], only: list[str] | None = None, regenerate: bool = False) -> list[dict[str, Any]]:
     """要出圖的項目：bg／sprite、還有場景在用（``used_in`` 非空）、狀態是 planned（``regenerate`` 時 planned 與 generated 都算；``only`` 指定時不看狀態）。"""
@@ -290,7 +409,7 @@ def generate(config: Any, work: Path, backend: ComfyBackend, *, candidates: int 
     report = GenReport()
     if not todo:
         return report
-    profile = resolve_profile(backend, art)
+    profile = resolve_profile(backend, art, config)
     model_name = profile["unet"]
     backgrounds = art_prompts.bg_index(load_scene_docs(work))
     backgrounds.setdefault(asset_manifest.TITLE_BG_ID, (asset_manifest.TITLE_LOCATION_ID, asset_manifest.TITLE_TIME_OF_DAY))

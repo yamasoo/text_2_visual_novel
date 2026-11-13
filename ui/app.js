@@ -1,115 +1,14 @@
 "use strict";
 /* 視覺小說工作台：單檔 vanilla JS，不需要建置。資料一律用 textContent 寫入（不拼 innerHTML）。 */
 
-const EXPRS = [["neutral", "平常"], ["serious", "認真"], ["worried", "不安"], ["angry", "生氣"], ["surprised", "驚訝"], ["sad", "難過"], ["embarrassed", "尷尬"], ["smile", "開心"]];
-const TIMES = [["dawn", "清晨"], ["morning", "上午"], ["day", "白天"], ["dusk", "黃昏"], ["night", "夜晚"]];
-const POS = [["left", "左"], ["center", "中"], ["right", "右"]];
-const ROLES = [["protagonist", "主角"], ["main", "主要配角"], ["supporting", "配角"], ["antagonist", "反派"], ["minor", "路人"]];
-const SHAPES = [["tall", "高"], ["broad", "壯"], ["small", "小"], ["bent", "彎"], ["round", "圓"]];
-const EFFECTS = [["none", "無"], ["shake", "震動"], ["flash", "閃光"], ["fade_in", "淡入"], ["fade_out", "淡出"]];
-const WEATHER = [["", "（天氣）"], ["clear", "晴"], ["cloudy", "陰"], ["rain", "雨"], ["storm", "暴風雨"], ["fog", "霧"]];
-const STATE_LABEL = { none: ["未標註", ""], draft: ["待校對", "warn"], reviewed: ["已校對", "ok"] };
-const OUTLINE_LABEL = { library: ["書庫章綱", "info"], extract: ["已抽取", "info"], none: ["無", ""] };
-
-const $ = (sel, el = document) => el.querySelector(sel);
-
-function h(tag, props, ...kids) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props || {})) {
-    if (value == null || value === false) continue;
-    if (key === "class") el.className = value;
-    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-    else if (key === "value") el.value = value;
-    else if (key === "checked" || key === "disabled" || key === "selected" || key === "hidden") el[key] = !!value;
-    else el.setAttribute(key, value === true ? "" : value);
-  }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
-  return el;
-}
-
-async function api(path, opts = {}) {
-  const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
-  if (opts.body) { init.body = JSON.stringify(opts.body); init.headers["Content-Type"] = "application/json"; }
-  const response = await fetch(path, init);
-  let data = null;
-  try { data = await response.json(); } catch (_) { /* 非 JSON */ }
-  if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`);
-  return data;
-}
-
-/* 上傳檔案：檔案內容當請求本體，檔名（網址編碼）放在 X-Filename 標頭；回傳解析後的 JSON。 */
-async function uploadFile(path, file) {
-  const response = await fetch(path, { method: "POST", headers: { "X-Filename": encodeURIComponent(file.name) }, body: file });
-  let data = null;
-  try { data = await response.json(); } catch (_) { /* 非 JSON */ }
-  if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`);
-  return data;
-}
-
-function toast(message, kind) {
-  const el = h("div", { class: "toast " + (kind || "") }, message);
-  $("#toast").append(el);
-  setTimeout(() => el.remove(), kind === "bad" ? 7000 : 3000);
-}
-const fail = (error) => toast(error.message || String(error), "bad");
-
-function options(pairs, current) { return pairs.map(([v, label]) => h("option", { value: v, selected: v === current }, label)); }
-function select(pairs, current, onchange, cls) { return h("select", { class: cls || "", onchange: (e) => onchange(e.target.value) }, options(pairs, current)); }
-function badge(label, kind) { return h("span", { class: "chip " + (kind || "") }, label); }
-
-function modal(content) {
-  const box = $("#modal-box");
-  box.replaceChildren(content);
-  $("#modal").hidden = false;
-  return () => { $("#modal").hidden = true; };
-}
-$("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("#modal").hidden = true; });
-
-let dirty = false;
-window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
-function confirmLeave() { return !dirty || confirm("有尚未存檔的修改，確定要離開？"); }
-
-/* ---------------------------------------------------------------- 路由 */
-
-/** 頁面註冊表：page_*.js 把自己放進來，route() 依網址第三段派送。 */
-const PAGES = {};
-let currentRoute = "";
-window.addEventListener("hashchange", () => {
-  if (!confirmLeave()) { location.hash = currentRoute; return; }
-  dirty = false; route();
-});
-async function route() {
-  currentRoute = location.hash || "#/";
-  const parts = currentRoute.replace(/^#\/?/, "").split("/").filter(Boolean);
-  const view = $("#view");
-  view.replaceChildren(h("p", { class: "muted" }, "載入中…"));
-  try {
-    if (parts[0] === "book" && parts[2] === "ch") await viewEditor(parts[1], Number(parts[3]));
-    else if (parts[0] === "settings") await PAGES.settings();
-    else if (parts[0] === "book" && PAGES[parts[2]]) await PAGES[parts[2]](parts[1], parts.slice(3));
-    else if (parts[0] === "book") await viewBook(parts[1], parts[2] === "cast" ? "cast" : "chapters");
-    else await viewShelf();
-  } catch (error) { view.replaceChildren(h("div", { class: "card" }, h("p", {}, "出錯了：" + error.message), h("a", { href: "#/" }, "回書架"))); }
-}
-function crumbs(items) {
-  $("#crumbs").replaceChildren(...items.flatMap((item, i) => [i ? "›" : "", item.href ? h("a", { href: item.href }, item.label) : h("span", {}, item.label)]));
-}
-async function refreshChip() {
-  const chip = $("#llm-chip");
-  try {
-    const s = await api("/api/state");
-    chip.className = "chip " + (s.llm.key_ok ? "ok" : "bad");
-    chip.textContent = s.llm.key_ok ? `AI：${s.default_executor || s.llm.provider} / ${s.llm.model || "（未選模型）"}` : "AI：沒有金鑰";
-    chip.title = s.llm.key_ok ? "" : s.llm.message;
-  } catch (_) { chip.textContent = ""; }
-}
-
 /* ---------------------------------------------------------------- 書架與匯入 */
 
-async function viewShelf() {
-  crumbs([{ label: "書架" }]);
-  const [state, data] = await Promise.all([api("/api/state"), api("/api/books")]);
-  const view = $("#view");
+FE.PAGES.home = async (ctx) => {
+  ctx.crumbs([{ label: "書架" }]);
+  const [state, data] = await Promise.all([
+    FE.api("/api/state", { signal: ctx.signal }),
+    FE.api("/api/books", { signal: ctx.signal }),
+  ]);
   const shelf = h("div", { class: "shelf" }, data.books.map((b) => {
     const pct = b.chapters ? Math.round((100 * b.reviewed) / b.chapters) : 0;
     return h("a", { class: "card book", href: `#/book/${b.book_id}` },
@@ -117,9 +16,9 @@ async function viewShelf() {
       h("div", { class: "muted small" }, `${b.book_id} · ${b.chapters} 章 · 已標註 ${b.annotated} · 已校對 ${b.reviewed}`),
       h("div", { class: "bar" }, h("i", { style: `width:${pct}%` })));
   }));
-  view.replaceChildren(h("h1", {}, "書架"), data.books.length ? shelf : h("p", { class: "muted" }, "還沒有書。從下面匯入第一本。"),
+  ctx.view(h("h1", {}, "書架"), data.books.length ? shelf : h("p", { class: "muted" }, "還沒有書。從下面匯入第一本。"),
     importPanel(data, state));
-}
+};
 
 function importPanel(data, state) {
   const box = h("div", { class: "card" });
@@ -128,7 +27,7 @@ function importPanel(data, state) {
   const body = h("div", {});
   const tabBar = h("div", { class: "tabs" });
   function draw() {
-    tabBar.replaceChildren(...tabs.map(([k, label]) => h("div", { class: "tab" + (k === active ? " on" : ""), onclick: () => { active = k; draw(); } }, label)));
+    tabBar.replaceChildren(...tabs.map(([k, label]) => h("div", { class: tabClass(k === active), onclick: () => { active = k; draw(); } }, label)));
     body.replaceChildren(active === "library" ? libraryTab(data, state) : fileTab(active === "paste"));
   }
   box.append(h("h2", { style: "margin-top:0" }, "匯入新書"), tabBar, body);
@@ -145,11 +44,12 @@ function libraryTab(data, state) {
 }
 
 async function importLibrary(entry) {
-  const bookId = prompt("書的 ID（小寫英文、數字、底線，例如 sample_book）：", "");
+  const bookId = await ask("書的 ID（小寫英文、數字、底線，例如 sample_book）：");
   if (!bookId) return;
   try {
-    await api("/api/import/library", { body: { dir_name: entry.dir_name, book_id: bookId.trim(), display_name: entry.dir_name } });
-    toast("匯入完成"); location.hash = `#/book/${bookId.trim()}`;
+    await FE.api("/api/import/library", { body: { dir_name: entry.dir_name, book_id: bookId, display_name: entry.dir_name } });
+    toast("匯入完成");
+    FE.go("#/book/" + encodeURIComponent(bookId));
   } catch (error) { fail(error); }
 }
 
@@ -203,11 +103,11 @@ function previewTable(data, form) {
     try {
       await api("/api/import/commit", { body: { files: form.files, paths: form.paths, text: form.text, book_id: id, display_name: nameInput.value.trim() || id,
         opts: { ...form.opts, skip: [...skip], titles } } });
-      toast("匯入完成"); location.hash = `#/book/${id}`;
+      toast("匯入完成"); FE.go(`#/book/${id}`);
     } catch (error) { fail(error); }
   };
   return h("div", {},
-    data.warnings.map((w) => h("div", { class: "chip warn", style: "display:block;margin:4px 0;white-space:normal" }, w)),
+    data.warnings.map((w) => h("div", { class: chipClass("warn"), style: "display:block;margin:4px 0;white-space:normal" }, w)),
     h("div", { style: "max-height:300px;overflow:auto;margin:8px 0" }, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "匯入"), h("th", {}, "章號"), h("th", {}, "章名"), h("th", {}, "字數"), h("th", {}, "提醒"), h("th", {}, "開頭"))), h("tbody", {}, rows))),
     h("div", { class: "row" }, bookId, nameInput, h("button", { class: "primary", onclick: commit }, `匯入 ${data.chapters.length} 章`)));
@@ -222,33 +122,16 @@ function fileToBase64(file) {
   });
 }
 
-async function browse(onPick, { dirs = false, start = "" } = {}) {
-  const dialog = h("div", {});
-  const close = modal(dialog);
-  async function open(path) {
-    try {
-      const data = await api("/api/fs/list?path=" + encodeURIComponent(path || "") + (dirs ? "&dirs_only=true" : ""));
-      const join = (name) => data.path + (data.path.endsWith(data.sep || "/") ? "" : (data.sep || "/")) + name;
-      dialog.replaceChildren(h("h2", { style: "margin-top:0" }, dirs ? "選擇資料夾" : "選擇檔案"),
-        h("div", { class: "row small" }, data.roots.map((r) => h("button", { class: "sm", onclick: () => open(r.path) }, r.name))),
-        h("div", { class: "row small", style: "margin:6px 0" }, h("span", { class: "muted grow" }, data.path || "（選一個起點）"),
-          dirs && data.path ? h("button", { class: "primary sm", onclick: () => { onPick(data.path); close(); } }, "選這個資料夾") : ""),
-        data.parent ? h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(data.parent); } }, "↑ 上一層")) : "",
-        ...data.dirs.map((d) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(join(d)); } }, "📁 " + d))),
-        ...data.files.map((f) => h("div", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); onPick(join(f)); close(); } }, "📄 " + f))));
-    } catch (error) { fail(error); }
-  }
-  open(start);
-}
-const browseFiles = (onPick, start) => browse(onPick, { start });
-
 /* ---------------------------------------------------------------- 書：章節、角色、任務 */
 
-async function viewBook(bookId, tab) {
-  const data = await api(`/api/books/${bookId}/chapters`);
+FE.PAGES["book/:id"] = async (ctx) => viewBook(ctx.params.id, "chapters", ctx);
+FE.PAGES["book/:id/cast"] = async (ctx) => viewBook(ctx.params.id, "cast", ctx);
+
+async function viewBook(bookId, tab, ctx) {
+  const data = await FE.api(`/api/books/${bookId}/chapters`, { signal: ctx.signal });
   const lang = data.book.lang;
   const name = (data.book.display_name || {})[lang] || bookId;
-  crumbs([{ label: "書架", href: "#/" }, { label: name }]);
+  ctx.crumbs([{ label: "書架", href: "#/" }, { label: name }]);
   const selected = new Set();
   const force = h("input", { type: "checkbox" });
 
@@ -268,10 +151,10 @@ async function viewBook(bookId, tab) {
     if (!selected.size) return toast("先勾選要處理的章節", "bad");
     try {
       const body = { kind, chapters: [...selected], force: force.checked };
-      const executor = AiPanel.executor();
+      const executor = Executors.value();
       if (executor) body.executor = executor;
-      await api(`/api/books/${bookId}/jobs`, { body });
-      AiPanel.poll();
+      const started = await FE.api(`/api/books/${bookId}/jobs`, { body });
+      Panel.attach(started.id);
     } catch (error) { fail(error); }
   }
   async function buildProto() {
@@ -291,13 +174,13 @@ async function viewBook(bookId, tab) {
       h("button", { onclick: buildProto }, "建立可玩原型（勾選章；不勾＝全部）")),
     h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, pickAll), h("th", {}, "章"), h("th", {}, "章名"), h("th", {}, "字數"), h("th", {}, "章綱"), h("th", {}, "標註"), h("th", {}, "場數"), h("th", {}))), h("tbody", {}, rows)));
   const tabs = h("div", { class: "tabs" },
-    h("a", { class: "tab" + (tab === "chapters" ? " on" : ""), href: `#/book/${bookId}` }, "章節"),
-    h("a", { class: "tab" + (tab === "cast" ? " on" : ""), href: `#/book/${bookId}/cast` }, "角色表"));
-  $("#view").replaceChildren(h("h1", {}, name), tabs, tab === "cast" ? await castPane(bookId, lang) : chapterPane);
+    h("a", { class: tabClass(tab === "chapters"), href: `#/book/${bookId}` }, "章節"),
+    h("a", { class: tabClass(tab === "cast"), href: `#/book/${bookId}/cast` }, "角色表"));
+  ctx.view(h("h1", {}, name), tabs, tab === "cast" ? await castPane(bookId, lang, ctx) : chapterPane);
 }
 
-async function castPane(bookId, lang) {
-  const doc = await api(`/api/books/${bookId}/cast`);
+async function castPane(bookId, lang, ctx) {
+  const doc = await FE.api(`/api/books/${bookId}/cast`, { signal: ctx.signal });
   const chars = doc.characters;
   const body = h("tbody", {});
   function draw() {
@@ -335,21 +218,27 @@ async function castPane(bookId, lang) {
 
 /* ---------------------------------------------------------------- 校對編輯器 */
 
-async function viewEditor(bookId, number) {
-  const [data, castDoc, book] = await Promise.all([api(`/api/books/${bookId}/chapters/${number}`), api(`/api/books/${bookId}/cast`), api(`/api/books/${bookId}/chapters`)]);
+FE.PAGES["book/:id/ch/:n"] = async (ctx) => viewEditor(ctx.params.id, Number(ctx.params.n), ctx);
+
+async function viewEditor(bookId, number, ctx) {
+  const [data, castDoc, book] = await Promise.all([
+    FE.api(`/api/books/${bookId}/chapters/${number}`, { signal: ctx.signal }),
+    FE.api(`/api/books/${bookId}/cast`, { signal: ctx.signal }),
+    FE.api(`/api/books/${bookId}/chapters`, { signal: ctx.signal }),
+  ]);
   const lang = book.book.lang;
-  const bible = await api(`/api/books/${bookId}/bible`).catch(() => ({ locations: [], bgm: [] }));
+  const bible = await FE.api(`/api/books/${bookId}/bible`, { signal: ctx.signal }).catch(() => ({ locations: [], bgm: [] }));
   const labels = { locs: Object.fromEntries(bible.locations.map((e) => [e.id, e.label])), bgms: Object.fromEntries(bible.bgm.map((e) => [e.id, e.label])) };
   const bookName = (book.book.display_name || {})[lang] || bookId;
   const chapter = data.chapter;
-  crumbs([{ label: "書架", href: "#/" }, { label: bookName, href: `#/book/${bookId}` }, { label: `第 ${number} 章 ${chapter.title}` }]);
-  const view = $("#view");
+  ctx.crumbs([{ label: "書架", href: "#/" }, { label: bookName, href: `#/book/${bookId}` }, { label: `第 ${number} 章 ${chapter.title}` }]);
   if (!data.scenes) {
-    view.replaceChildren(h("h1", {}, `第 ${number} 章 ${chapter.title}`), h("div", { class: "card" }, h("p", {}, "這一章還沒有標註。"),
+    ctx.view(h("h1", {}, `第 ${number} 章 ${chapter.title}`), h("div", { class: "card" }, h("p", {}, "這一章還沒有標註。"),
       h("button", { class: "primary", onclick: async () => {
         try { const body = { kind: "annotate", chapters: [number] };
-        if (AiPanel.executor()) body.executor = AiPanel.executor();
-        const job = await api(`/api/books/${bookId}/jobs`, { body }); toast("已開始標註，完成後重新整理本頁；進度在章節頁看"); location.hash = `#/book/${bookId}`; void job; } catch (error) { fail(error); }
+        const executor = Executors.value();
+        if (executor) body.executor = executor;
+        const job = await FE.api(`/api/books/${bookId}/jobs`, { body }); toast("已開始標註，完成後重新整理本頁；進度在章節頁看"); Panel.attach(job.id); FE.go(`#/book/${bookId}`); } catch (error) { fail(error); }
       } }, "用 AI 標註這一章")));
     return;
   }
@@ -370,7 +259,7 @@ async function viewEditor(bookId, number) {
   const issueChip = h("span", {});
   const saveBtn = h("button", { class: "primary", onclick: () => save(null) }, "存檔 (Ctrl+S)");
 
-  function touch() { dirty = true; saveBtn.textContent = "存檔 (Ctrl+S) ●"; scheduleCheck(); }
+  function touch() { FE.dirty.set(true); saveBtn.textContent = "存檔 (Ctrl+S) ●"; scheduleCheck(); }
   let checkTimer = null;
   function scheduleCheck() {
     clearTimeout(checkTimer);
@@ -388,11 +277,16 @@ async function viewEditor(bookId, number) {
       result.doc.scenes.forEach((s, i) => { s.lines.forEach((line, j) => { const old = doc.scenes[i] && doc.scenes[i].lines[j]; if (old && old._flag) line._flag = true; }); });
       doc.scenes = result.doc.scenes;
       if (newStatus) status = newStatus;
-      dirty = false; saveBtn.textContent = "存檔 (Ctrl+S)";
+      FE.dirty.set(false); saveBtn.textContent = "存檔 (Ctrl+S)";
       toast("已存檔"); drawAll();
     } catch (error) { fail(error); }
   }
-  document.onkeydown = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(null); } };
+  function onKey(e) { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(null); } }
+  document.addEventListener("keydown", onKey);
+  ctx.signal.addEventListener("abort", () => {
+    document.removeEventListener("keydown", onKey);
+    clearTimeout(checkTimer);
+  }, { once: true });
 
   function usedParas() {
     const map = new Map();
@@ -407,15 +301,15 @@ async function viewEditor(bookId, number) {
   }
   function focusPara(no) {
     hot = no; drawSource();
-    const el = $("#para-" + no); if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    const el = document.getElementById("para-" + no); if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
   function drawIssues() {
     const errors = issues.filter((i) => i.level === "error").length, warns = issues.filter((i) => i.level === "warning").length;
-    issueChip.className = "chip " + (errors ? "bad" : warns ? "warn" : "ok");
+    issueChip.className = chipClass(errors ? "bad" : warns ? "warn" : "ok");
     issueChip.textContent = errors ? `${errors} 個錯誤（不能存）` : warns ? `${warns} 個提醒` : "沒有問題";
     const [label, kind] = status === "none" ? ["未標註", ""] : STATE_LABEL[status];
-    statusChip.className = "chip " + kind; statusChip.textContent = label;
+    statusChip.className = chipClass(kind); statusChip.textContent = label;
     drawScenes();
   }
 
@@ -495,7 +389,7 @@ async function viewEditor(bookId, number) {
       h("button", { class: "ghost sm", disabled: s === 0, onclick: () => { move(doc.scenes, s, -1); touch(); drawScenes(); } }, "↑場"),
       h("button", { class: "ghost sm", disabled: s === doc.scenes.length - 1, onclick: () => { move(doc.scenes, s, 1); touch(); drawScenes(); } }, "↓場"),
       h("button", { class: "ghost sm", disabled: s === doc.scenes.length - 1, onclick: () => mergeNext(s) }, "與下一場合併"),
-      h("button", { class: "ghost sm", disabled: doc.scenes.length === 1, onclick: () => { if (confirm("刪除整場？")) { doc.scenes.splice(s, 1); touch(); drawScenes(); } } }, "刪除場"));
+      h("button", { class: "ghost sm", disabled: doc.scenes.length === 1, onclick: async () => { if (await FE.confirm("刪除整場？", { danger: true, ok: "刪除" })) { doc.scenes.splice(s, 1); touch(); drawScenes(); } } }, "刪除場"));
     const present = new Set((scene.cast || []).map((m) => m.char_id));
     const cast = h("div", { class: "scene-cast" }, h("span", { class: "muted" }, "出場："),
       ...(scene.cast || []).map((m, i) => h("span", { class: "member" }, (chars[m.char_id]?.names[lang]) || m.char_id,
@@ -521,7 +415,7 @@ async function viewEditor(bookId, number) {
   const bar = h("div", { class: "editor-bar" }, h("strong", {}, `第 ${number} 章　${chapter.title}`), statusChip, issueChip, h("span", { class: "grow" }),
     h("label", { class: "small" }, h("input", { type: "checkbox", onchange: (e) => { onlyFlagged = e.target.checked; drawScenes(); } }), " 只看 ? 與有提醒的行"),
     prev, next, saveBtn, h("button", { onclick: () => save("reviewed") }, "存檔並標為已校對"));
-  view.replaceChildren(bar, h("div", { class: "editor" }, sourcePane, scenesPane));
+  ctx.view(bar, h("div", { class: "editor" }, sourcePane, scenesPane));
   drawAll();
 }
 

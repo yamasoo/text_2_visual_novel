@@ -105,3 +105,37 @@ def test_expression_tags():
     assert m.expression_tags("surprised") == "surprised, wide eyes, open mouth"
     with pytest.raises(ValueError):
         m.expression_tags("bogus")
+
+# ---------------------------------------------------------------- t2c 子物件（D26）
+
+def test_normalize_keeps_t2c_block():
+    sha = "a" * 40
+    card = m.normalize_card({"char_id": "a_ming", "t2c": {
+        "sections": {"head": ["a 40-year-old man", "short hair"], "body": ["an average build"]},
+        "outfits": {"default": {"top": ["a grey shirt"]}},
+        "source_sha1": sha,
+    }})
+    assert card["t2c"]["sections"]["head"] == ["a 40-year-old man", "short hair"]
+    assert card["t2c"]["outfits"]["default"]["top"] == ["a grey shirt"]
+    assert card["t2c"]["source_sha1"] == sha
+
+
+def test_normalize_drops_unknown_t2c_keys():
+    card = m.normalize_card({"char_id": "a_ming", "t2c": {
+        "sections": {"head": ["a man"], "tail": ["nope"]},
+        "outfits": {"default": {"hat": ["a cap"]}},
+        "junk": 1, "source_sha1": "not-a-sha",
+    }})
+    assert card["t2c"] == {"sections": {"head": ["a man"]}}
+
+
+def test_normalize_without_t2c_keeps_old_shape():
+    card = m.normalize_card({"char_id": "a_ming", "headshot_prompt": "short hair"})
+    assert "t2c" not in card
+
+
+def test_prompt_fingerprint_tracks_both_prompts():
+    one = m.prompt_fingerprint({"headshot_prompt": "short hair", "sprite_prompt": "grey shirt"})
+    two = m.prompt_fingerprint({"headshot_prompt": "short hair", "sprite_prompt": "brown pants"})
+    assert len(one) == 40 and one != two
+    assert one == m.prompt_fingerprint({"headshot_prompt": "short hair", "sprite_prompt": "grey shirt"})

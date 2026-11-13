@@ -1,13 +1,16 @@
 /* 設定頁：AI 執行者（DeepSeek、本機 llama.cpp、自訂）、預設執行者、位置、其他。#/settings */
 "use strict";
 
-PAGES.settings = async function () {
-  crumbs([{ label: "書架", href: "#/" }, { label: "設定" }]);
-  const st = await api("/api/settings");
+FE.PAGES.settings = async (ctx) => {
+  ctx.crumbs([{ label: "書架", href: "#/" }, { label: "設定" }]);
+  const st = await FE.api("/api/settings", { signal: ctx.signal });
   const ex = st.executors, paths = st.paths;
   const THINK = { off: "關閉（最快最省，預設）", low: "低", medium: "中", high: "高", max: "最高" };
+  const comfy = st.comfyui || {};
   const form = { default: ex.default, providers: {}, remove: [], paths: { works_dir: paths.works_dir_is_default ? "" : paths.works_dir, book_library: paths.book_library },
-    comfyui: { base_url: st.comfyui.base_url }, server: { port: st.server.port } };
+    comfyui: { base_url: comfy.base_url || "", default_profile: comfy.default_profile || "",
+               profiles: JSON.parse(JSON.stringify(comfy.profiles || {})) },
+    server: { port: st.server.port } };
   const edit = (id, key, value) => { (form.providers[id] ||= {})[key] = value; };
   const field = (label, control, hint) => h("div", { style: "margin:8px 0" }, h("div", { class: "small muted" }, label), control, hint ? h("div", { class: "small muted" }, hint) : "");
 
@@ -19,12 +22,12 @@ PAGES.settings = async function () {
     const keyInput = h("input", { type: "password", placeholder: p.key.needed ? "貼上 API 金鑰" : "（本機通常不需要）", autocomplete: "off", style: "width:280px" });
     const saveKey = async () => {
       if (!keyInput.value.trim()) return toast("先貼上金鑰", "bad");
-      try { const r = await api("/api/settings/key", { body: { provider: p.id, key: keyInput.value.trim() } }); keyInput.value = ""; toast("金鑰已存到 " + r.saved_to); PAGES.settings(); refreshChip(); } catch (error) { fail(error); }
+      try { const r = await FE.api("/api/settings/key", { body: { provider: p.id, key: keyInput.value.trim() } }); keyInput.value = ""; toast("金鑰已存到 " + r.saved_to); FE.route(); refreshChip(); } catch (error) { fail(error); }
     };
     const test = async () => {
       testOut.style.color = ""; testOut.textContent = "測試中…（用已儲存的設定；改了欄位請先按最下面的「儲存設定」）";
       try {
-        const r = await api("/api/settings/test", { body: { executor: p.id } });
+        const r = await FE.api("/api/settings/test", { body: { executor: p.id } });
         testOut.style.color = r.ok ? "var(--ok)" : "var(--bad)";
         testOut.replaceChildren(document.createTextNode((r.ok ? "✔ " : "✖ ") + r.message + (r.tokens ? `（${r.model}，${r.tokens} tokens）` : "")),
           ...(r.models && r.models.length ? [h("div", { class: "row", style: "margin-top:4px" }, h("span", { class: "muted" }, "伺服器上的模型："), r.models.map((m) => h("button", { class: "sm", onclick: () => { modelInput.value = m; edit(p.id, "model", m); } }, m)))] : []));
@@ -48,7 +51,7 @@ PAGES.settings = async function () {
           field("要求 JSON 輸出", h("input", { type: "checkbox", checked: p.json_mode, onchange: (e) => edit(p.id, "json_mode", e.target.checked) }), "不支援的伺服器請關掉。")),
         field("API 金鑰", h("div", { class: "row" }, keyInput, h("button", { onclick: saveKey }, "儲存金鑰"), p.key.found ? h("span", { class: "small muted" }, "目前：" + p.key.where) : ""), "只存在這台電腦的系統 keyring，不寫進 config.yaml，也不會顯示在畫面上。"),
         h("div", { class: "row" }, h("button", { onclick: test }, "測試連線"),
-          p.builtin ? "" : h("button", { class: "ghost sm", onclick: () => { if (confirm(`刪除自訂供應商 ${p.id}？儲存後生效。`)) { form.remove.push(p.id); toast("已標記刪除，按「儲存設定」生效"); } } }, "刪除此供應商")),
+          p.builtin ? "" : h("button", { class: "ghost sm", onclick: async () => { if (await FE.confirm(`刪除自訂供應商 ${p.id}？儲存後生效。`, { danger: true, ok: "刪除" })) { form.remove.push(p.id); toast("已標記刪除，按「儲存設定」生效"); } } }, "刪除此供應商")),
         testOut));
   }
 
@@ -57,29 +60,187 @@ PAGES.settings = async function () {
   const newUrl = h("input", { placeholder: "http://192.168.1.5:8000/v1", style: "width:260px" });
   const newModel = h("input", { placeholder: "模型名稱（可留空）", style: "width:170px" });
   const addCustom = h("div", { class: "row" }, newId, newUrl, newModel, h("button", { onclick: async () => {
-    try { await api("/api/settings", { method: "PUT", body: { executors: { providers: { [newId.value.trim()]: { base_url: newUrl.value.trim(), model: newModel.value.trim() || undefined, name: newId.value.trim() } } } } }); toast("已新增"); PAGES.settings(); } catch (error) { fail(error); }
+    try { await FE.api("/api/settings", { method: "PUT", body: { executors: { providers: { [newId.value.trim()]: { base_url: newUrl.value.trim(), model: newModel.value.trim() || undefined, name: newId.value.trim() } } } } }); toast("已新增"); FE.route(); } catch (error) { fail(error); }
   } }, "新增自訂供應商"));
 
   const worksInput = h("input", { value: form.paths.works_dir, placeholder: `（預設）${paths.project_root}\\works`, style: "width:min(520px,100%)", oninput: (e) => { form.paths.works_dir = e.target.value.trim(); } });
   const libInput = h("input", { value: form.paths.book_library, style: "width:min(520px,100%)", oninput: (e) => { form.paths.book_library = e.target.value.trim(); } });
+  /* ---------------------------------------------------------------- ComfyUI（QQ-4） */
+  // 一份正本同時給漫畫與 VN：位址、預設 profile、profiles（kind／workflow／模型／負向）。
+  let comfyModels = null;
+  let comfyEdit = Object.keys(form.comfyui.profiles)[0] || "";
+  const comfyOut = h("div");
+
+  const drawComfy = () => {
+    const names = Object.keys(form.comfyui.profiles);
+    const choose = (name) => { comfyEdit = name; drawComfy(); };
+    const list = h("select", { style: "width:220px", onchange: (e) => choose(e.target.value) },
+      [["", "（沒有 profile：用內建預設）"]].concat(names.map((n) => [n, n]))
+        .map(([value, label]) => h("option", { value, selected: comfyEdit === value }, label)));
+    const presetSelect = names.length
+      ? h("select", { style: "width:220px", onchange: (e) => { form.comfyui.default_profile = e.target.value; } },
+          [["", "（不指定：用內建預設）"]].concat(names.map((n) => [n, n]))
+            .map(([value, label]) => h("option", { value, selected: (form.comfyui.default_profile || "") === value }, label)))
+      : h("span", { class: "small muted" }, "先新增一個 profile");
+    const spec = form.comfyui.profiles[comfyEdit] || null;
+    if (spec && spec.default_preset && !(spec.presets || {})[spec.default_preset]) spec.default_preset = "";   // 指向已被改名的 preset：清掉，存檔才不會又寫回去
+    const set = (key, value) => { spec[key] = value; };
+    const setModel = (key, value) => { spec.models = { ...(spec.models || {}), [key]: value }; };
+    const picker = (key, label) => {
+      const items = (comfyModels && comfyModels[key]) || [];
+      return field(label, items.length
+        ? h("select", { style: "width:min(420px,100%)", onchange: (e) => setModel(key, e.target.value) },
+            [["", "（留空＝依 kind 自動挑）"]].concat(items.map((m) => [m, m]))
+              .map(([value, text]) => h("option", { value, selected: ((spec.models || {})[key] || "") === value }, text)))
+        : h("input", { value: (spec.models || {})[key] || "", style: "width:min(420px,100%)", placeholder: "留空＝依 kind 自動挑；先按「抓模型清單」", oninput: (e) => setModel(key, e.target.value.trim()) }));
+    };
+    const presetTable = (prof) => {
+      prof.presets = prof.presets && typeof prof.presets === "object" ? prof.presets : {};
+      const presets = prof.presets;
+      const num = (row, key, width) => h("input", { type: "number", step: "any", value: row[key] ?? "", style: `width:${width}px`,
+        oninput: (e) => { const raw = e.target.value.trim(); const n = Number(raw); if (raw !== "" && Number.isFinite(n)) row[key] = n; else delete row[key]; } });
+      const str = (row, key, width, placeholder, listId) => h("input", { value: row[key] ?? "", list: listId || undefined, style: `width:${width}px`,
+        placeholder: placeholder || "", oninput: (e) => { const v = e.target.value.trim(); if (v === "") delete row[key]; else row[key] = v; } });
+      const row = (name) => {
+        if (!presets[name] || typeof presets[name] !== "object") presets[name] = {};
+        const row = presets[name];
+        const nameInput = h("input", { value: name, style: "width:120px", onchange: (e) => {
+          const next = e.target.value.trim();
+          if (!next || next === name) { e.target.value = name; return; }
+          if (presets[next]) { e.target.value = name; return toast("這一組已經有同名 preset", "bad"); }
+          const rebuilt = {};
+          for (const key of Object.keys(presets)) rebuilt[key === name ? next : key] = presets[key];
+          prof.presets = rebuilt;
+          if (String(prof.default_preset || "") === name) prof.default_preset = next;
+          drawComfy();
+        } });
+        return h("tr", {},
+          h("td", {}, nameInput),
+          h("td", {}, num(row, "steps", 72)), h("td", {}, num(row, "cfg", 72)),
+          h("td", {}, str(row, "sampler", 112, "", "comfy-sampler-list")),
+          h("td", {}, str(row, "scheduler", 104, "", "comfy-scheduler-list")),
+          h("td", {}, str(row, "lora", 200, "（不用就留空）", "comfy-lora-list")),
+          h("td", {}, num(row, "lora_strength", 80)),
+          h("td", {}, h("button", { class: "sm ghost", onclick: async () => {
+            if (!(await FE.confirm(`刪掉 preset「${name}」？`, { danger: true, ok: "刪除" }))) return;
+            delete presets[name];
+            if (String(prof.default_preset || "") === name) prof.default_preset = "";
+            drawComfy();
+          } }, "刪除列")));
+      };
+      const knownLoras = (comfyModels && comfyModels.lora) || [];
+      const badLoras = knownLoras.length
+        ? Object.keys(presets).map((name) => (presets[name] || {}).lora).filter((x) => x && knownLoras.indexOf(x) < 0)
+        : [];
+      const loraWarning = badLoras.length
+        ? h("div", { class: "small", style: "color:var(--bad);margin-top:4px" },
+            "⚠ 這些 lora 檔名不在 ComfyUI 的清單裡（出圖會被 ComfyUI 退回）：" + badLoras.join("、")
+            + "。請用欄位下拉或按上面的「抓模型清單」後重挑。")
+        : "";
+      return h("div", {},
+        Object.keys(presets).length
+          ? h("div", {},
+              h("table", {},
+                h("thead", {}, h("tr", {}, ["預設名稱", "steps", "cfg", "sampler", "scheduler", "lora", "lora_strength", ""].map((t) => h("th", {}, t)))),
+                h("tbody", {}, Object.keys(presets).map((name) => row(name)))),
+              h("datalist", { id: "comfy-lora-list" }, ((comfyModels && comfyModels.lora) || []).map((m) => h("option", { value: m }))),
+              h("datalist", { id: "comfy-sampler-list" }, ["euler", "euler_ancestral", "er_sde", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "ddim", "uni_pc"]
+                .map((m) => h("option", { value: m }))),
+              h("datalist", { id: "comfy-scheduler-list" }, ["simple", "normal", "beta", "karras", "sgm_uniform", "exponential"]
+                .map((m) => h("option", { value: m }))),
+              loraWarning)
+          : h("div", { class: "small muted" }, "這一組還沒有 preset；留空＝用 workflow 的預設值。"),
+        h("div", { class: "row", style: "margin-top:6px" }, h("button", { class: "sm", onclick: () => {
+          let name = "preset"; let i = 2;
+          while (presets[name]) name = "preset" + (i++);
+          presets[name] = { steps: 20, cfg: 7 };
+          drawComfy();
+        } }, "新增預設列"), h("span", { class: "small muted" }, "欄位：steps、cfg、sampler、scheduler、lora、lora_strength。")));
+    };
+    const edits = spec ? [
+      field("種類（決定 workflow 與猜模型的方式）", h("select", { onchange: (e) => set("kind", e.target.value) },
+        [["anima", "Anima"], ["moss", "MOSS-Image"]].map(([value, text]) => h("option", { value, selected: (spec.kind || "anima") === value }, text)))),
+      field("workflow 檔", h("input", { value: spec.workflow || "", style: "width:min(420px,100%)", placeholder: "留空＝內建（anima.api.json／moss.api.json）", oninput: (e) => set("workflow", e.target.value.trim()) })),
+      picker("unet", "主模型（unet）"), picker("clip", "文字編碼器（clip）"), picker("vae", "VAE"),
+      field("負向提示詞", h("textarea", { rows: 2, style: "width:min(520px,100%)", oninput: (e) => set("negative", e.target.value) }, spec.negative || "")),
+      field("預設 preset", h("div", { class: "row" },
+        h("select", { style: "width:220px", onchange: (e) => set("default_preset", e.target.value) },
+          [["", "（不指定：照 workflow 內建；不會自動挑第一個）"]].concat(Object.keys(spec.presets || {}).map((n) => [n, n]))
+            .map(([value, label]) => h("option", { value, selected: (spec.default_preset || "") === value }, label))),
+        h("span", { class: "small muted" }, "presets 是這一組自己的，別組的同名 preset 互不影響。"))),
+      presetTable(spec),
+    ] : [h("div", { class: "small muted" }, "目前沒有 profile：下面可以新增一個。")];
+
+    const newName = h("input", { placeholder: "profile 名稱（小寫英文，例如 moss）", style: "width:240px" });
+    const testOut = h("div", { class: "small", style: "margin-top:6px" });
+    comfyOut.replaceChildren(h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "ComfyUI（出圖）"),
+      h("div", { class: "small muted" }, "漫畫與 VN 共用這一份設定：位址、profile、模型檔都只有這裡。漫畫的專案用哪一組由 project.yaml 的 comfy_profile 決定；VN 這本書用哪一組在「素材 → 畫風（這本書）」。"),
+      field("位址", h("div", { class: "row" },
+        h("input", { value: form.comfyui.base_url, style: "width:320px", oninput: (e) => { form.comfyui.base_url = e.target.value.trim(); } }),
+        h("button", { class: "sm", onclick: async () => {
+          testOut.style.color = ""; testOut.textContent = "測試中…";
+          try { const r = await FE.api("/api/settings/comfyui/test", { body: { base_url: form.comfyui.base_url } });
+            testOut.style.color = "var(--ok)"; testOut.textContent = "✔ " + r.message + (r.device ? `（${r.device}）` : "");
+          } catch (error) { testOut.style.color = "var(--bad)"; testOut.textContent = "✖ " + error.message; }
+        } }, "測試連線"),
+        h("button", { class: "sm", onclick: async () => {
+          testOut.style.color = ""; testOut.textContent = "抓清單…";
+          try { comfyModels = await FE.api(`/api/settings/comfyui/models?base_url=${encodeURIComponent(form.comfyui.base_url)}`);
+            const counts = ["unet", "clip", "vae"].map((k) => `${k} ${(comfyModels[k] || []).length}`).join("／");
+            testOut.style.color = "var(--ok)"; testOut.textContent = "✔ 抓到 " + counts; drawComfy();
+          } catch (error) { testOut.style.color = "var(--bad)"; testOut.textContent = "✖ " + error.message; }
+        } }, "抓模型清單")),
+        "同一臺 ComfyUI 一次只掛一組模型：換 profile 就是換掛那一組檔案。測試與抓清單用的都是上面這個位址（改完記得按最下面的「儲存設定」）。"),
+      field("預設 profile（漫畫專案沒指定 comfy_profile 時用它；VN 這本書在「素材 → 畫風（這本書）」挑）", h("div", { class: "row" }, presetSelect)),
+      field("選擇要編輯的 profile", h("div", { class: "row" }, list,
+        h("button", { class: "sm", onclick: () => {
+          const name = newName.value.trim();
+          if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return toast("名稱只能用小寫英文、數字、底線、連字號", "bad");
+          if (form.comfyui.profiles[name]) return toast("已經有同名 profile", "bad");
+          form.comfyui.profiles[name] = { kind: "anima", workflow: "", models: { unet: "", clip: "", vae: "" }, negative: "" };
+          newName.value = ""; comfyEdit = name; drawComfy();
+        } }, "新增"),
+        h("button", { class: "sm", onclick: () => {
+          if (!comfyEdit) return toast("先選一個 profile", "bad");
+          let name = comfyEdit + "_copy"; let i = 2;
+          while (form.comfyui.profiles[name]) name = comfyEdit + "_copy" + (i++);
+          form.comfyui.profiles[name] = JSON.parse(JSON.stringify(form.comfyui.profiles[comfyEdit]));
+          comfyEdit = name; drawComfy();
+        } }, "複製"),
+        h("button", { class: "sm ghost", onclick: async () => {
+          if (!comfyEdit) return;
+          if (!(await FE.confirm(`刪除 profile「${comfyEdit}」？按「儲存設定」後生效。`, { danger: true, ok: "刪除" }))) return;
+          delete form.comfyui.profiles[comfyEdit];
+          if (form.comfyui.default_profile === comfyEdit) form.comfyui.default_profile = "";
+          comfyEdit = Object.keys(form.comfyui.profiles)[0] || ""; drawComfy();
+        } }, "刪除")), h("div", { class: "row" }, newName)),
+      ...edits,
+      testOut));
+  };
+
+  const comfyCard = () => comfyOut;
+
   const save = async () => {
     try {
       const body = { executors: { default: form.default, providers: form.providers, remove: form.remove }, paths: form.paths, comfyui: form.comfyui, server: form.server };
-      const r = await api("/api/settings", { method: "PUT", body });
-      toast(r.restart_required ? "已存檔。埠號要重新啟動工作台才會生效" : "設定已儲存"); refreshChip(); AiPanel.reloadChoices(); PAGES.settings();
+      const r = await FE.api("/api/settings", { method: "PUT", body });
+      toast(r.restart_required ? "已存檔。埠號要重新啟動工作台才會生效" : "設定已儲存"); refreshChip(); Executors.reload(); FE.route();
     } catch (error) { fail(error); }
   };
-  $("#view").replaceChildren(h("h1", {}, "設定"),
+  drawComfy();
+
+  ctx.view(h("h1", {}, "設定"),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "預設執行者"), h("div", { class: "row" }, defaultSelect, h("span", { class: "small muted" }, "沒特別指定時，標註與抽取用這個。右側 AI 面板可以臨時改用別的。"))),
     h("h2", {}, "AI 執行者"), ...ex.providers.map(providerCard),
     h("div", { class: "card" }, h("div", { class: "small muted" }, "自己的 OpenAI 相容伺服器（vLLM、LM Studio、Ollama 的 /v1 等）"), addCustom),
+    comfyCard(),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "位置"),
       field("作品存放位置（匯入的章節、標註、原型、之後的圖片都放這裡）", h("div", { class: "row" }, worksInput, h("button", { onclick: () => browse((p) => { worksInput.value = p; form.paths.works_dir = p; }, { dirs: true, start: paths.works_dir }) }, "瀏覽…"),
         h("button", { onclick: () => { worksInput.value = ""; form.paths.works_dir = ""; } }, "用預設")), "目前：" + paths.works_dir + "。改位置不會搬移已有的書，要自己把舊資料夾整個複製過去。"),
       field("書庫位置（novel-studio 的書；唯讀，只會讀取）", h("div", { class: "row" }, libInput, h("button", { onclick: () => browse((p) => { libInput.value = p; form.paths.book_library = p; }, { dirs: true, start: paths.book_library }) }, "瀏覽…")), paths.library_exists ? "" : "⚠ 找不到這個資料夾"),
       field("專案資料夾（程式與設定檔所在，不能在這裡改）", h("code", {}, paths.project_root))),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "其他"),
-      field("ComfyUI 位址（之後產圖用）", h("input", { value: form.comfyui.base_url, style: "width:320px", oninput: (e) => { form.comfyui.base_url = e.target.value.trim(); } })),
+      field("ComfyUI 位址", h("span", { class: "small muted" }, "移到上面的「ComfyUI（出圖）」卡片：漫畫與 VN 共用同一個位址。")),
       field("工作台埠號", h("input", { type: "number", min: 1024, max: 65535, value: form.server.port, style: "width:100px", oninput: (e) => { form.server.port = Number(e.target.value); } }), `預設 7866；目前執行在 ${st.server.running_port ?? "?"}。改了要關掉工作台再啟動。`)),
     h("div", { class: "row" }, h("button", { class: "primary", onclick: save }, "儲存設定"), h("span", { class: "small muted" }, `存到 ${st.config_path || "（沒有設定檔）"}；會重寫整個檔案（YAML 註解不保留），舊檔備份成 config.yaml.bak。`)));
 };

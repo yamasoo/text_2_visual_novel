@@ -18,7 +18,8 @@ def js():
 def test_page_registered(js):
     assert js.lstrip().startswith("/*")
     assert '"use strict"' in js
-    assert re.search(r"PAGES\.export\s*=\s*async\s+function\s*\(\s*bookId", js)
+    # 頁面改由 fekit 註冊：路由字串 + ctx（原本是 PAGES.export = async function (bookId)）。
+    assert re.search(r'FE\.PAGES\["book/:id/export"\]\s*=\s*async\s*\(\s*ctx\s*\)', js)
     assert "crumbs(" in js and "輸出" in js
 
 
@@ -34,7 +35,8 @@ def test_no_hardcoded_host(js):
 
 def test_api_routes_used(js):
     assert "/export" in js
-    for part in ("/export/settings", "/export/title", "/export/run", "/export/verify", "/export/report", "/export/shot", "/art/refresh", "/api/jobs/", "/stop"):
+    # 任務端點改走 fekit 的 /api/fe-jobs，停止鈕改呼叫 tracker.stop()（原本打 /api/jobs/{id} 與 /api/jobs/{id}/stop）。
+    for part in ("/export/settings", "/export/title", "/export/run", "/export/verify", "/export/report", "/export/shot", "/art/refresh", "/api/fe-jobs", "tracker.stop"):
         assert part in js, part
     assert "encodeURIComponent" in js
     assert len(re.findall(r'method:\s*"PUT"', js)) >= 2
@@ -43,7 +45,8 @@ def test_api_routes_used(js):
 def test_payload_keys(js):
     for key in ("sdk", "project", "tags", "description", "chapters", "placeholders", "clean", "report", "summary", "cases", "preflight_errors"):
         assert key in js, key
-    assert "AiPanel.poll" in js
+    # AiPanel.poll → Panel.attach。
+    assert "Panel.attach" in js
 
 
 def test_ui_labels(js):

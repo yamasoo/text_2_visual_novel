@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 JOBS_DIR_NAME = "_jobs"
-ID_PATTERN = re.compile(r"^[a-z0-9]{1,40}$")
+# 開頭可以是數字：P1 之前的紀錄 id 是 uuid 十六進位（例如 930fb90d44），那些檔案還打得開。
+# 字元集不含斜線、反斜線與點，所以一樣擋掉路徑穿越。
+ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_]{1,39}$")
 STATUS_VALUES = ("running", "done", "error", "stopped")
 REQUIRED_FIELDS = ("id", "book_id", "kind", "status", "started")
 MAX_LOG_LINES = 2000
@@ -39,7 +41,7 @@ def _validate_id(job_id: Any) -> str:
     """檢查任務 id 格式（同時擋掉路徑穿越）。"""
     if not isinstance(job_id, str) or ID_PATTERN.fullmatch(job_id) is None:
         raise ValueError(
-            f"job id 不合法：{job_id!r}（必須符合 ^[a-z0-9]{{1,40}}$）"
+            f"job id 不合法：{job_id!r}（必須符合 {ID_PATTERN.pattern}）"
         )
     return job_id
 
@@ -56,6 +58,28 @@ def _read_record(path: Path) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+ITEM_STATE = {"pending": "pending", "running": "running", "done": "done",
+              "skipped": "skipped", "error": "error", "stopped": "stopped"}
+
+
+def _items(items: Any) -> Any:
+    """把 P4 之前的 items（``{no,status,note}``）讀成 fekit 形狀（``{key,label,state,note}``）。
+
+    紀錄是磁碟上的既有資料，不會自己改寫；統一在讀的那一端轉，頁面就只認一種形狀。
+    """
+    if not isinstance(items, list):
+        return items
+    rows = []
+    for row in items:
+        if not isinstance(row, dict) or "state" in row or not isinstance(row.get("no"), int):
+            rows.append(row)
+            continue
+        number = row["no"]
+        rows.append({"key": "ch%03d" % number, "label": "第 %d 章" % number,
+                     "state": ITEM_STATE.get(row.get("status"), "pending"), "note": row.get("note", "")})
+    return rows
 
 
 def _summary(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -91,7 +115,7 @@ def save_record(work: Path, record: dict[str, Any]) -> Path:
     """存到 ``work/_jobs/<id>.json`` 並回傳路徑（必要時建立資料夾）。
 
     必填欄位：``id``、``book_id``、``kind``、``status``、``started``，缺任何一個
-    都會 ``ValueError``。``id`` 必須符合 ``^[a-z0-9]{1,40}$``；``status`` 必須是
+    都會 ``ValueError``。``id`` 必須符合 ``^[a-z0-9][a-z0-9_]{1,39}$``；``status`` 必須是
     running／done／error／stopped 之一；``started`` 必須是 int 或 float
     （不可 bool、不可字串）；``log`` 若有必須是 list，且只保留最後 2000 行。
     其他欄位原樣保存。同一個 id 再存一次就是覆蓋。
@@ -138,7 +162,10 @@ def save_record(work: Path, record: dict[str, Any]) -> Path:
 def load_record(work: Path, job_id: str) -> dict[str, Any] | None:
     """讀單筆完整紀錄。id 不合格 → ``ValueError``；檔案不存在或壞掉 → ``None``。"""
     _validate_id(job_id)
-    return _read_record(_record_path(work, job_id))
+    record = _read_record(_record_path(work, job_id))
+    if record is not None and "items" in record:
+        record["items"] = _items(record["items"])
+    return record
 
 
 def list_records(work: Path, limit: int | None = None) -> list[dict[str, Any]]:

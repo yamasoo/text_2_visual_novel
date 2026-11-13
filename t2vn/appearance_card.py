@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -93,6 +94,66 @@ def _normalize_expressions(value: Any) -> list[str]:
     return ordered or list(DEFAULT_EXPRESSION_LIST)
 
 
+# --------------------------------------------------- T2C 子物件（D26，漫畫線用）
+T2C_SECTIONS = ("head", "body", "upper", "lower", "accessory")
+T2C_OUTFIT_PARTS = ("top", "bottom", "set")
+OUTFIT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+SHA1 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _phrases(value: Any) -> list[str]:
+    """字串或字串清單 → 去空白、去重、去空的短語清單。"""
+    items = value if isinstance(value, (list, tuple)) else ([value] if value else [])
+    out: list[str] = []
+    for item in items:
+        text = WHITESPACE_PATTERN.sub(" ", str(item or "")).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def t2c_block(data: Any) -> dict[str, Any] | None:
+    """外型卡的 t2c 子物件（D26）：清理後回傳；沒有、或清完是空的就回 None。
+
+    只做形狀清理（sections 的五段、outfits 的 top／bottom／set、source_sha1）；
+    不補值、不驗內容，內容規則由 vendor.t2c.bible_check 判定。
+    """
+    raw = data.get("t2c") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    sections = raw.get("sections")
+    if isinstance(sections, dict):
+        clean = {name: _phrases(sections.get(name)) for name in T2C_SECTIONS}
+        clean = {name: items for name, items in clean.items() if items}
+        if clean:
+            out["sections"] = clean
+    outfits = raw.get("outfits")
+    if isinstance(outfits, dict):
+        clean_outfits: dict[str, Any] = {}
+        for oid, parts in outfits.items():
+            key = str(oid or "").strip()
+            if not OUTFIT_ID.match(key) or not isinstance(parts, dict):
+                continue
+            fit = {name: _phrases(parts.get(name)) for name in T2C_OUTFIT_PARTS}
+            fit = {name: items for name, items in fit.items() if items}
+            if fit:
+                clean_outfits[key] = fit
+        if clean_outfits:
+            out["outfits"] = clean_outfits
+    sha = str(raw.get("source_sha1") or "").strip().lower()
+    if SHA1.match(sha):
+        out["source_sha1"] = sha
+    return out or None
+
+
+def prompt_fingerprint(card: Any) -> str:
+    """兩個提示詞串起來的 sha1；t2c.source_sha1 用它判斷人工值是否過期。"""
+    data = card if isinstance(card, dict) else {}
+    text = "\n".join(str(data.get(field) or "") for field in PROMPT_FIELDS)
+    return hashlib.sha1(text.encode(UTF8)).hexdigest()
+
+
 # -------------------------------------------------------------------- 外型卡
 
 
@@ -122,7 +183,7 @@ def normalize_card(data: Any, char_id: str | None = None) -> dict[str, Any]:
     if not isinstance(raw_id, str) or CHAR_ID.match(raw_id) is None:
         raise ValueError(f"char_id 不合法：{raw_id!r}")
 
-    return {
+    card = {
         "char_id": raw_id,
         "confirmed": bool(data.get("confirmed", False)),
         "headshot_prompt": _clean_field(data.get("headshot_prompt")),
@@ -130,6 +191,10 @@ def normalize_card(data: Any, char_id: str | None = None) -> dict[str, Any]:
         "expressions": _normalize_expressions(data.get("expressions")),
         "notes": _clean_field(data.get("notes")),
     }
+    block = t2c_block(data)          # D26：有才寫，沒有就維持舊檔的形狀
+    if block is not None:
+        card["t2c"] = block
+    return card
 
 
 def load_card(path: str | Path) -> dict[str, Any]:

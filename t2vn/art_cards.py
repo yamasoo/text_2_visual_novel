@@ -214,8 +214,18 @@ def save_card(
     """存外型卡（網址的 ``char_id`` 優先），並同步 ``style.json`` 的角色標籤。
 
     ``confirmed`` 為真但兩個提示詞都沒有可用標籤 → ``ArtCardsError``（不寫任何檔）。
+    介面送來的是整份卡；沒帶到的 ``t2c`` 子物件（D26）沿用舊檔，不然存一次就被洗掉。
     """
     _check_id(char_id)
+    if isinstance(data, dict) and "t2c" not in data:
+        path = card_path(work, char_id)
+        if path.is_file():
+            try:
+                previous = appearance_card.load_card(path)
+            except (OSError, ValueError):
+                previous = {}
+            if isinstance(previous.get("t2c"), dict):
+                data = {**data, "t2c": previous["t2c"]}
     try:
         card = appearance_card.normalize_card(data, char_id)
     except ValueError as exc:

@@ -94,10 +94,10 @@ def make_llm(provider: str, model: str, thinking: str = "off", max_output: int =
                        + f"\nfix: python -m t2vn.llm set-key {provider}")
 
     def call(messages: list[dict[str, str]], on_delta: Callable[[str], None] | None = None,
-             should_stop: Callable[[], bool] | None = None) -> LlmResult:
+             should_stop: Callable[[], bool] | None = None, json_mode: bool = True) -> LlmResult:
         try:
-            text, usage = providers.chat(home, base, messages, on_delta=on_delta, json_mode=True, stage=_STAGE,
-                                         timeout=timeout, should_stop=should_stop)
+            text, usage = providers.chat(home, base, messages, on_delta=on_delta, json_mode=bool(json_mode),
+                                         stage=_STAGE, timeout=timeout, should_stop=should_stop)
         except providers.Cancelled as exc:
             raise JobStopped("stopped") from exc
         except providers.ProviderError as exc:
@@ -128,11 +128,13 @@ def make_llm_from(prov: dict[str, Any], secrets_home: str | Path | None = None, 
                        "（本機服務可以按「測試連線」從清單選）")
 
     def call(messages: list[dict[str, str]], on_delta: Callable[[str], None] | None = None,
-             should_stop: Callable[[], bool] | None = None, on_thinking: Callable[[str], None] | None = None) -> LlmResult:
+             should_stop: Callable[[], bool] | None = None, on_thinking: Callable[[str], None] | None = None,
+             json_mode: bool = True) -> LlmResult:
         executors.check_fit(messages, prov)
         try:
-            text, usage = providers.chat(home, prov, messages, on_delta=on_delta, on_thinking=on_thinking, json_mode=True,
-                                         stage=executors.STAGE, timeout=timeout, should_stop=should_stop)
+            text, usage = providers.chat(home, prov, messages, on_delta=on_delta, on_thinking=on_thinking,
+                                         json_mode=bool(json_mode), stage=executors.STAGE, timeout=timeout,
+                                         should_stop=should_stop)
         except providers.Cancelled as exc:
             raise JobStopped("stopped") from exc
         except providers.ProviderError as exc:

@@ -213,6 +213,17 @@ def test_export_book_writes_files_and_preflight_is_clean(tmp_path):
     assert manifest["title"] == "書名" and manifest["backgrounds"][0]["present"] is False  # 匯出當下尚未補圖
 
 
+def test_missing_background_blocks_the_export(tmp_path):
+    config, work, renpy = make_env(tmp_path)
+    with pytest.raises(ExportError, match="bg_scrapyard_dawn"):
+        export_book(config, "bk", [1], renpy)
+    assert not (renpy / "game" / "vn_ch001.rpy").exists()  # 一個檔都沒寫，不會留下半套專案
+    (work / "assets" / "bg").mkdir(parents=True)
+    (work / "assets" / "bg" / "bg_scrapyard_dawn.png").write_bytes(b"png")
+    result = export_book(config, "bk", [1], renpy)
+    assert (renpy / "game" / "vn_ch001.rpy").is_file() and result.placeholders is None
+
+
 def test_real_assets_are_copied_and_audio_played(tmp_path):
     config, work, renpy = make_env(tmp_path)
     (work / "assets" / "bg").mkdir(parents=True)
@@ -230,7 +241,7 @@ def test_real_assets_are_copied_and_audio_played(tmp_path):
 
 def test_gold_fallback_and_missing_chapter(tmp_path):
     config, work, renpy = make_env(tmp_path, scenes_dir="gold")
-    export_book(config, "bk", [1], renpy)
+    export_book(config, "bk", [1], renpy, placeholders=True)
     with pytest.raises(ExportError, match="chapter 2"):
         export_book(config, "bk", [1, 2], renpy)
 
@@ -239,7 +250,7 @@ def test_font_copy_and_validation(tmp_path):
     config, work, renpy = make_env(tmp_path)
     font = tmp_path / "SomeFont.ttf"
     font.write_bytes(b"font")
-    export_book(config, "bk", [1], renpy, font=font)
+    export_book(config, "bk", [1], renpy, font=font, placeholders=True)
     assert (renpy / "game/fonts/vn_font.ttf").read_bytes() == b"font"
     assert json.loads((renpy / "game/vn_export.json").read_text(encoding="utf-8"))["font"] == {"file": "fonts/vn_font.ttf", "present": True}
     with pytest.raises(ExportError):
@@ -250,9 +261,9 @@ def test_clean_and_stale_chapter_warning(tmp_path):
     config, work, renpy = make_env(tmp_path)
     (renpy / "game" / "vn_ch007.rpy").write_text("label ch007:\n    return\n", encoding="utf-8")
     (renpy / "game" / "keep.rpy").write_text("# mine\n", encoding="utf-8")
-    result = export_book(config, "bk", [1], renpy)
+    result = export_book(config, "bk", [1], renpy, placeholders=True)
     assert any("vn_ch007.rpy" in w for w in result.warnings) and (renpy / "game/vn_ch007.rpy").exists()
-    export_book(config, "bk", [1], renpy, clean=True)
+    export_book(config, "bk", [1], renpy, clean=True, placeholders=True)
     assert not (renpy / "game/vn_ch007.rpy").exists() and (renpy / "game/keep.rpy").exists()
 
 
@@ -260,7 +271,7 @@ def test_project_without_game_dir_is_rejected_and_standalone_mode(tmp_path):
     config, work, renpy = make_env(tmp_path)
     with pytest.raises(ExportError, match="launcher"):
         export_book(config, "bk", [1], tmp_path / "empty")
-    result = export_book(config, "bk", [1])
+    result = export_book(config, "bk", [1], placeholders=True)
     assert result.game_dir == work / "build" / "renpy" / "game" and (result.game_dir / "vn_ch001.rpy").is_file()
 
 
@@ -329,7 +340,7 @@ def test_export_book_copies_fallback_files(tmp_path):
     (work / "assets" / "headshot").mkdir()
     (work / "assets" / "sprite" / "lao_zhang_neutral.png").write_bytes(b"s")
     (work / "assets" / "headshot" / "lao_zhang_smile.png").write_bytes(b"h")
-    export_book(config, "bk", [1], renpy)
+    export_book(config, "bk", [1], renpy, placeholders=True)
     game = renpy / "game"
     assert (game / "images/sprite/lao_zhang_neutral.png").read_bytes() == b"s"
     assert (game / "images/headshot/lao_zhang_smile.png").read_bytes() == b"h"
@@ -378,7 +389,7 @@ def test_export_book_copies_title_assets(tmp_path):
     (work / "assets" / "bg" / "bg_title.png").write_bytes(b"png")
     (work / "assets" / "bgm").mkdir()
     (work / "assets" / "bgm" / "bgm_title.opus").write_bytes(b"opus")
-    export_book(config, "bk", [1], renpy)
+    export_book(config, "bk", [1], renpy, placeholders=True)
     game = renpy / "game"
     assert (game / "images/bg/bg_title.png").is_file() and (game / "audio/bgm/bgm_title.opus").is_file()
     theme = (game / "vn_theme.rpy").read_text(encoding="utf-8")

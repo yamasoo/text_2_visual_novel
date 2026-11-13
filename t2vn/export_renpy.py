@@ -608,6 +608,14 @@ def export_book(
         exists=lambda rel: (game / rel).is_file(), audio_file=audio_file, font_file=font_rel, captions=captions,
         voice_file=(lambda line_id: voice_lookup.get(line_id)) if voice else None)
 
+    # 每個 scene 都會 emit「scene <bg>」，而 vn_images.rpy 的 image 一律指向 images/bg/<id>.png；
+    # 缺檔不會在匯出時出錯，只會在 Ren'Py 跑到那一景時說找不到 image（成品已經壞了）。
+    missing_bg = [item["asset_id"] for item in rendered.manifest["backgrounds"] if not item["present"]]
+    if missing_bg and not placeholders:
+        shown = ", ".join(missing_bg[:10]) + (f" (+{len(missing_bg) - 10} more)" if len(missing_bg) > 10 else "")
+        raise ExportError(
+            f"missing background image(s) under assets/bg/: {shown}; add the files or re-run with --placeholders")
+
     written: list[str] = []
     for name, text in rendered.files.items():
         _write(config, game / name, text)

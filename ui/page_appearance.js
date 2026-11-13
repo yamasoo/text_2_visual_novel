@@ -20,21 +20,41 @@
   const PROMPT_PLACEHOLDER = "英文標籤，逗號分隔；打 __ 可叫出 wildcard";
   const HEADSHOT_TITLE = "頭像（頸部以上：髮型髮色、眼型眼色、頭飾、耳環、項鍊、特殊特徵；不含表情）";
   const SPRITE_TITLE = "立繪（頸部以下：衣服、身體、動作）";
-  const POLL_MS = 1500;
+  // 漫畫線（D26）：外型卡的 t2c 人工值，bible 角色卡直接吃這幾段。
+  const T2C_SECTIONS = [
+    ["head", "頭：髮型髮色、眼型眼色、部位特徵；性別字與年齡一定要在這裡"],
+    ["body", "身體：只放體型（slim build、muscular arms）"],
+    ["upper", "上著"],
+    ["lower", "下著"],
+    ["accessory", "永久配件：眼鏡、髮夾、疤、痣（會隨服裝換的留在服裝）"],
+  ];
+  const T2C_OUTFIT_PARTS = [
+    ["top", "上著"],
+    ["bottom", "下著"],
+    ["set", "整套：制服、圍裙、連身這類"],
+  ];
+  const T2C_HINT = "一行一個英文短語；動作詞（standing）與表情詞不要放進來";
   const MAX_STYLE_OPTIONS = 200;
   const SUGGESTION_LIMIT = 12;
   const SUGGESTION_PATTERN = /__([a-z0-9_]*)$/;
+
+  // 進行中的任務追蹤器：換頁時一起收掉，遲到的回呼才不會改到已卸下的節點。
+  const trackers = new Set();
+
+  function closeTrackers() {
+    for (const item of trackers) item.close();
+    trackers.clear();
+  }
 
   function imgUrl(base, file) {
     return `${base}/file?path=${encodeURIComponent(file)}`;
   }
 
-  function jobPercent(current, running) {
-    const total = current && current.total ? current.total : 0;
+  function jobPercent(job, running) {
+    const progress = job && job.progress ? job.progress : null;
+    const total = progress && progress.total ? progress.total : 0;
     if (!total) return running ? 0 : 100;
-    const index = (current && current.index) || 1;
-    const bonus = current && current.event === "asset_done" ? 1 : 0;
-    return Math.round((100 * (index - 1 + bonus)) / total);
+    return Math.round((100 * (progress.done || 0)) / total);
   }
 
   function assetLabel(asset) {
@@ -154,10 +174,10 @@
   /* ---------------------------------------------------------------- 畫風 */
 
   function uploadStyles(base, file) {
-    if (typeof uploadFile !== "function") {
-      throw new Error("這個版本還沒有上傳功能（頁面缺少 uploadFile），請重新整理或回報");
+    if (typeof FE.upload !== "function") {
+      throw new Error("這個版本還沒有上傳功能（頁面缺少 FE.upload），請重新整理或回報");
     }
-    return uploadFile(`${base}/styles/upload`, file);
+    return FE.upload(`${base}/styles/upload`, file);
   }
 
   function stylePane(state) {
@@ -425,6 +445,119 @@
       placeholder: "備註（AI 對沒有依據之處的提醒會出現在這裡）",
       value: source.notes || "",
     });
+    /* ---- t2c 人工值（漫畫線 D26）：bible 角色卡直接吃 sections 與 outfits.default */
+    const t2cSource = source.t2c && typeof source.t2c === "object" ? source.t2c : {};
+    const t2cSections = t2cSource.sections && typeof t2cSource.sections === "object" ? t2cSource.sections : {};
+    const t2cOutfit = (t2cSource.outfits && t2cSource.outfits.default) || {};
+    const toText = (items) => (Array.isArray(items) ? items.join("\n") : "");
+    const toLines = (text) =>
+      String(text || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line, index, all) => line && all.indexOf(line) === index);
+    const t2cInput = (table, key) =>
+      h("textarea", { rows: 2, style: "width:100%", placeholder: T2C_HINT, value: toText(table[key]) });
+    const sectionInputs = T2C_SECTIONS.map(([key, label]) => {
+      const input = t2cInput(t2cSections, key);
+      return { key, input, node: h("div", { style: "margin-top:6px" }, h("div", { class: "small" }, label), input) };
+    });
+    const outfitInputs = T2C_OUTFIT_PARTS.map(([key, label]) => {
+      const input = t2cInput(t2cOutfit, key);
+      return { key, input, node: h("div", { style: "margin-top:6px" }, h("div", { class: "small" }, label), input) };
+    });
+    let shaOverride = "";
+    let checkData = null;
+
+    const t2cPayload = () => {
+      const sections = {};
+      for (const item of sectionInputs) {
+        const lines = toLines(item.input.value);
+        if (lines.length) sections[item.key] = lines;
+      }
+      const outfit = {};
+      for (const item of outfitInputs) {
+        const lines = toLines(item.input.value);
+        if (lines.length) outfit[item.key] = lines;
+      }
+      if (!Object.keys(sections).length && !Object.keys(outfit).length) return null;
+      const t2c = {};
+      if (Object.keys(sections).length) t2c.sections = sections;
+      if (Object.keys(outfit).length) t2c.outfits = { default: outfit };
+      // 第一次在介面上寫 t2c 也要有指紋，否則過期判斷永遠不會亮
+      const sha = shaOverride || t2cSource.source_sha1 || (checkData && checkData.current_sha1);
+      if (typeof sha === "string" && sha) t2c.source_sha1 = sha;
+      return t2c;
+    };
+
+    const errorBadge = h("span", {});
+    const warnBadge = h("span", {});
+    const staleBadge = h("span", {});
+    const sourceHost = h("div", { class: "small muted" });
+    const issuesHost = h("div", {});
+    const seedButton = h("button", { class: "sm" }, "用提示詞粗拆初稿");
+    const staleButton = h("button", { class: "sm", hidden: true }, "重設指紋");
+
+    const paintCheck = (data) => {
+      const issues = (data && data.issues) || [];
+      const errors = issues.filter((item) => item.level === "error");
+      const warnings = issues.filter((item) => item.level !== "error");
+      errorBadge.replaceChildren(badge(errors.length ? errors.length + " error" : "0 error", errors.length ? "err" : "ok"));
+      warnBadge.replaceChildren(warnings.length ? badge(warnings.length + " warn", "warn") : "");
+      staleBadge.replaceChildren(data && data.stale ? badge("人工值可能過期", "warn") : "");
+      staleButton.hidden = !(data && data.stale);
+      sourceHost.textContent =
+        !data || data.source === "placeholder"
+          ? "沒有外型卡：bible 卡是佔位卡，不列入檢查"
+          : data.source === "derived"
+            ? "還沒有人工值：bible 卡目前用提示詞的文字規則粗拆"
+            : "bible 卡用外型卡的人工值（t2c）";
+      issuesHost.replaceChildren(
+        ...(data && data.stale
+          ? [h("div", { class: "small muted" }, "提示詞改過之後 t2c 指的是舊提示詞；看過沒問題再按「重設指紋」。")]
+          : []),
+        ...issues.map((item) =>
+          h(
+            "div",
+            { class: item.level === "error" ? "small bad" : "small" },
+            (item.level === "error" ? "✖ " : "! ") + item.where + "：" + item.message
+          )
+        ),
+        ...(issues.length ? [] : [h("div", { class: "small muted" }, "check_card 沒有問題")])
+      );
+    };
+
+    const runCheck = async () => {
+      try {
+        const data = await api(`${state.base}/cards/${character.id}/check`);
+        checkData = data;
+        paintCheck(data);
+      } catch (error) {
+        fail(error);
+      }
+    };
+
+    seedButton.addEventListener("click", async () => {
+      const draft = (checkData && checkData.draft) || {};
+      if (!draft.sections && !draft.outfits) return toast("沒有提示詞可以粗拆（檢查還沒回來，或這張卡還沒有外型卡）");
+      const busy =
+        sectionInputs.some((item) => item.input.value.trim()) ||
+        outfitInputs.some((item) => item.input.value.trim());
+      if (busy && !(await FE.confirm("會蓋掉目前的 t2c 內容，要填入粗拆初稿嗎？", { ok: "填入" }))) return;
+      for (const item of sectionInputs) item.input.value = toText((draft.sections || {})[item.key]);
+      for (const item of outfitInputs) item.input.value = toText(((draft.outfits || {}).default || {})[item.key]);
+      toast("已填入粗拆初稿（還沒存檔）");
+    });
+
+    staleButton.addEventListener("click", async () => {
+      if (!checkData) return;
+      shaOverride = checkData.current_sha1 || "";
+      try {
+        await save(confirmed, true);
+        toast("已用目前提示詞重設指紋並存檔");
+      } catch (error) {
+        fail(error);
+      }
+    });
     const statusHost = h("span", {});
     const evidenceHost = h("div", {});
     const thumbHost = h("div", { style: "width:100%;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start" });
@@ -455,20 +588,28 @@
       });
     }
 
-    const gather = () => ({
-      char_id: character.id,
-      confirmed,
-      headshot_prompt: headshotInput.value.trim(),
-      sprite_prompt: spriteInput.value.trim(),
-      expressions: checkedExpressions(),
-      notes: notesInput.value.trim(),
-    });
+    const gather = () => {
+      const payload = {
+        char_id: character.id,
+        confirmed,
+        headshot_prompt: headshotInput.value.trim(),
+        sprite_prompt: spriteInput.value.trim(),
+        expressions: checkedExpressions(),
+        notes: notesInput.value.trim(),
+      };
+      const t2c = t2cPayload();
+      if (t2c) payload.t2c = t2c; // 沒有內容就不送，存檔時沿用舊檔的 t2c
+      return payload;
+    };
     const signature = () =>
       JSON.stringify([
         headshotInput.value.trim(),
         spriteInput.value.trim(),
         checkedExpressions(),
         notesInput.value.trim(),
+        sectionInputs.map((item) => item.input.value.trim()),
+        outfitInputs.map((item) => item.input.value.trim()),
+        shaOverride,
       ]);
     let baseline = signature();
     const isDirty = () => signature() !== baseline;
@@ -484,6 +625,7 @@
       hasCard = true;
       baseline = signature();
       paintStatus();
+      await runCheck();
       if (!silent) toast(`${asConfirmed ? "已確認" : "已存草稿"} ${character.label}`);
       return saved;
     };
@@ -500,7 +642,7 @@
       draftButton.textContent = "AI 草擬中…";
       try {
         const body = {};
-        const executor = AiPanel.executor();
+        const executor = Executors.value();
         if (executor) body.executor = executor;
         const data = await api(`${state.base}/cards/${character.id}/draft`, {
           method: "POST",
@@ -587,29 +729,20 @@
       progressDetails,
       progressError
     );
-    let timer = null;
-    let jobId = "";
+    let tracker = null;
 
-    const paintProgress = (current) => {
-      barFill.style.width = `${jobPercent(current, true)}%`;
-      const asset = current && current.asset ? current.asset : "";
-      if (!asset) {
-        progressLine.textContent = "準備中…";
-        return;
-      }
-      const total = current.total || 0;
-      let text = `${asset}（第 ${current.index}/${total} 項`;
-      if (current.of) text += `，這項第 ${current.n}/${current.of} 張`;
-      progressLine.textContent = `${text}）`;
+    const paintProgress = (job) => {
+      barFill.style.width = `${jobPercent(job, true)}%`;
+      progressLine.textContent = job.note || "準備中…";
     };
 
     const paintFinished = (job) => {
       const status = job.status;
       progressTitle.textContent =
         status === "done" ? "出圖完成" : status === "stopped" ? "已停止" : "結束（有錯誤）";
-      barFill.style.width = `${jobPercent(job.current || {}, false)}%`;
+      barFill.style.width = `${jobPercent(job, false)}%`;
       stopButton.hidden = true;
-      const summary = job.summary || {};
+      const summary = job.result || {};
       const generated = summary.generated || [];
       const skipped = summary.skipped || [];
       const failed = summary.failed || {};
@@ -682,30 +815,43 @@
       }
     };
 
-    const tick = async () => {
-      let job;
-      try {
-        job = await api(`/api/jobs/${jobId}`);
-      } catch (error) {
-        progressError.textContent = error.message || String(error);
-        progressError.hidden = false;
-        timer = setTimeout(tick, POLL_MS);
-        return;
-      }
-      progressError.hidden = true;
-      if (job.status === "running") {
-        paintProgress(job.current || {});
-        timer = setTimeout(tick, POLL_MS);
-        return;
-      }
-      paintFinished(job);
-      generateButton.disabled = false;
-      await reloadAssets();
+    const closeTracker = () => {
+      const active = tracker;
+      tracker = null;
+      if (!active) return;
+      trackers.delete(active);
+      active.close();
+    };
+
+    const watchJob = (jobId) => {
+      closeTracker();
+      const watcher = FE.jobs.watch(jobId, {
+        base: "/api/fe-jobs",
+        onupdate: (job) => {
+          progressError.hidden = true;
+          if (job.status === "running" || job.status === "queued") paintProgress(job);
+        },
+        onconn: (state, error) => {
+          if (state !== "retrying" && state !== "gone") return;
+          progressError.textContent = (error && error.message) || "任務連線中斷，重試中";
+          progressError.hidden = false;
+        },
+        onend: async (job) => {
+          tracker = null;
+          trackers.delete(watcher);
+          paintFinished(job);
+          generateButton.disabled = false;
+          await reloadAssets();
+        },
+      });
+      tracker = watcher;
+      trackers.add(watcher);
     };
 
     stopButton.addEventListener("click", async () => {
+      if (!tracker) return;
       try {
-        await api(`/api/jobs/${jobId}/stop`, { method: "POST", body: {} });
+        await tracker.stop();
       } catch (error) {
         fail(error);
       }
@@ -737,8 +883,7 @@
             candidates: count,
           },
         });
-        AiPanel.poll();
-        jobId = job.id;
+        Panel.attach(job.id);
         generateButton.disabled = true;
         progressCard.hidden = false;
         progressTitle.textContent = "出圖中";
@@ -747,8 +892,7 @@
         progressError.hidden = true;
         barFill.style.width = "0%";
         stopButton.hidden = false;
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(tick, POLL_MS);
+        watchJob(job.id);
       } catch (error) {
         fail(error);
       }
@@ -756,6 +900,7 @@
 
     paintStatus();
     paintThumbs();
+    runCheck();
 
     return h(
       "div",
@@ -787,6 +932,28 @@
         h("span", { class: "small muted" }, "勾幾個就出幾張頭像，同一角色用同一個種子")
       ),
       h("div", { style: "margin-top:8px" }, notesInput),
+      h(
+        "div",
+        { class: "row", style: "align-items:center;gap:8px;margin-top:12px" },
+        h("strong", {}, "漫畫卡檢查"),
+        errorBadge,
+        warnBadge,
+        staleBadge,
+        h("span", { class: "grow" }),
+        seedButton,
+        staleButton
+      ),
+      sourceHost,
+      issuesHost,
+      h(
+        "details",
+        { style: "margin-top:8px" },
+        h("summary", { class: "small" }, "編輯 t2c 人工值（sections ＋ outfits.default）"),
+        h("div", { class: "small muted", style: "margin-top:6px" }, T2C_HINT),
+        ...sectionInputs.map((item) => item.node),
+        h("div", { class: "small", style: "margin-top:10px" }, "服裝 outfits.default"),
+        ...outfitInputs.map((item) => item.node)
+      ),
       h(
         "div",
         { class: "row", style: "align-items:center;gap:10px;margin-top:10px" },
@@ -847,17 +1014,20 @@
     return root;
   }
 
-  PAGES.appearance = async function (bookId) {
-    crumbs([
+  FE.PAGES["book/:id/appearance"] = async (ctx) => {
+    const bookId = ctx.params.id;
+    closeTrackers();
+    ctx.signal.addEventListener("abort", closeTrackers, { once: true });
+    ctx.crumbs([
       { label: "書架", href: "#/" },
       { label: bookId, href: `#/book/${bookId}` },
       { label: "角色外型卡" },
     ]);
-    $("#view").replaceChildren(h("div", { class: "muted" }, "載入中…"));
+    ctx.view(h("div", { class: "muted" }, "載入中…"));
     try {
-      $("#view").replaceChildren(await render(bookId));
+      ctx.view(await render(bookId));
     } catch (error) {
-      $("#view").replaceChildren(h("div", { class: "card bad" }, error.message));
+      ctx.view(h("div", { class: "card bad" }, error.message));
     }
   };
 
