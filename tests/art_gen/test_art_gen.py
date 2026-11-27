@@ -356,3 +356,29 @@ def test_vendor_backend_applies_profile_preset_and_lora():
     assert sampler["inputs"]["sampler_name"] == "euler" and sampler["inputs"]["scheduler"] == "simple"
     loras = [n for n in wf.values() if n["class_type"] == "LoraLoaderModelOnly"]
     assert loras and loras[0]["inputs"]["lora_name"] == "ANIMA\\x.safetensors"
+
+
+def test_vendor_backend_chains_preset_lora_and_profile_loras_with_triggers():
+    host = FakeConfig({"moss": {
+        "kind": "moss", "workflow": "",
+        "models": {"unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors"},
+        "negative": "", "default_preset": "turbo",
+        "presets": {"turbo": {"steps": 4, "cfg": 1.0, "lora": "fast_4step.safetensors", "lora_strength": 1.0}},
+        "loras": [
+            {"name": "style_ink.safetensors", "strength": 0.7, "on": True, "trigger": "ink wash"},
+            {"name": "disabled.safetensors", "strength": 0.5, "on": False, "trigger": "should_not_appear"},
+            {"name": "detail_v2.safetensors", "strength": 0.4, "on": True, "trigger": "fine lines"},
+        ],
+    }})
+    profile = resolve_profile(Fake(), {"comfy": {"profile": "moss"}}, host)
+    backend = art_gen.VendorBackend("http://127.0.0.1:1")
+    wf, _ = backend.prepare(profile, "1girl, solo", "bad", 7, 768, 1344)
+    lora_nodes = [n for n in wf.values() if n["class_type"] == "LoraLoaderModelOnly"]
+    assert [n["inputs"]["lora_name"] for n in lora_nodes] == [
+        "fast_4step.safetensors",
+        "style_ink.safetensors",
+        "detail_v2.safetensors",
+    ]
+    assert [n["inputs"]["strength_model"] for n in lora_nodes] == [1.0, 0.7, 0.4]
+    texts = [n["inputs"].get("text", "") for n in wf.values() if n["class_type"] == "CLIPTextEncode"]
+    assert any("ink wash" in t and "fine lines" in t and "should_not_appear" not in t for t in texts)

@@ -15,6 +15,7 @@ import json
 
 from . import annotate, check, layout, llm, prompts, script as sc
 from .compile import CompileError, compile_chapter
+from .project import record_version
 
 PANEL_FIELDS = ("slot", "shot", "angle", "location", "scene", "characters", "objects", "sfx", "bubbles")
 STAGES = ("annotate", "plan", "script", "storyboard")
@@ -130,6 +131,7 @@ class Adapter:
                 "unlisted_characters": [str(x) for x in plan.get("unlisted_characters") or []]}
         self._write(path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
         self.emit("saved", stage="plan", path=str(path))
+        record_version(self.project, "plan ch%03d" % int(chapter))
         return plan
 
     # --- ② 漫畫劇本 ---------------------------------------------------------
@@ -152,6 +154,30 @@ class Adapter:
             return ""
         return dict(sc.split_pages(sc.split_front(path.read_text(encoding="utf-8"))[1])).get(page_no, "")
 
+    def _ckpt_path(self, chapter, stage):
+        return self.project.out_dir("build", "adapt") / ("ch%03d_%s_ckpt.json" % (int(chapter), stage))
+
+    def _load_ckpt(self, chapter, stage):
+        p = self._ckpt_path(chapter, stage)
+        if not p.is_file():
+            return {}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_ckpt(self, chapter, stage, data):
+        self._write(self._ckpt_path(chapter, stage), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+    def _clear_ckpt(self, chapter, stage):
+        p = self._ckpt_path(chapter, stage)
+        try:
+            if p.is_file():
+                p.unlink()
+        except OSError:
+            pass
+
     def run_script(self, chapter, only_pages=None, force=False):
         plan = self.project.load_plan(chapter)
         source = self.project.load_source(chapter)
@@ -162,13 +188,22 @@ class Adapter:
             if not path.is_file():
                 raise AdaptError("%s 還不存在，無法只重寫部分頁。請先產生整章劇本" % path)
             blocks = dict(sc.split_pages(sc.split_front(path.read_text(encoding="utf-8"))[1]))
+        elif force:
+            self._clear_ckpt(chapter, "script")
         scenes = self._scenes(chapter)                        # 切對話的逐字台詞帳本（沒有就不附）
         want = sorted(set(only_pages)) if only_pages else [p["page"] for p in plan["pages"]]
+        ckpt = {} if (only_pages or force) else self._load_ckpt(chapter, "script")
+        ckpt_pages = ckpt.get("pages") if isinstance(ckpt.get("pages"), dict) else {}
         for page_no in want:
             plan_page = self._plan_page(plan, page_no)
             tpl_key = str(plan_page["template"])
             n_panels = len(self.pages_data["templates"][tpl_key]["panels"])
             tpl_name = self.pages_data["templates"][tpl_key].get("name", "")
+            cached = ckpt_pages.get(str(page_no))
+            if not only_pages and not force and isinstance(cached, dict) and cached.get("template") == tpl_key and cached.get("text"):
+                blocks[page_no] = cached["text"]
+                self.emit("page", stage="script", page=page_no)
+                continue
             prev = blocks.get(page_no - 1, "")
             messages = prompts.script_messages(self.project, source, plan, plan_page, self.pages_data, prev, scenes)
 
@@ -184,10 +219,16 @@ class Adapter:
                 return "\n".join(lines).strip(), issues
 
             blocks[page_no] = self._generate(chapter, "script", "第 %d 頁" % page_no, messages, validate, as_json=False)
+            if not only_pages:
+                ckpt_pages[str(page_no)] = {"template": tpl_key, "text": blocks[page_no]}
+                self._save_ckpt(chapter, "script", {"chapter": int(chapter), "pages": ckpt_pages})
             self.emit("page", stage="script", page=page_no)
         text = self._render_script(chapter, plan, blocks)
         self._write(path, text)
+        if not only_pages:
+            self._clear_ckpt(chapter, "script")
         self.emit("saved", stage="script", path=str(path))
+        record_version(self.project, "script ch%03d" % int(chapter))
         report = sc.fidelity(source, sc.parse_script(text)[1])
         self._write(self.project.out_dir("build", "adapt") / ("ch%03d_fidelity.md" % int(chapter)), sc.fidelity_markdown(report, plan.get("title", "")))
         return text, report
@@ -245,6 +286,7 @@ class Adapter:
         self._write(self.project.out_dir("build", "adapt") / ("ch%03d_scenes_fidelity.md" % int(chapter)),
                     annotate.fidelity_markdown(report, scene_doc.get("title") or title_hint))
         self.emit("saved", stage="annotate", path=str(path))
+        record_version(self.project, "annotate ch%03d" % int(chapter))
         return scene_doc, report
 
     def _load_script(self, chapter):
@@ -289,11 +331,20 @@ class Adapter:
         if only_pages and path.is_file():
             for p in self.project.load_storyboard(chapter).get("pages", []):
                 done[p["page"]] = p
+        elif force:
+            self._clear_ckpt(chapter, "storyboard")
         title = str(meta.get("title") or "")
+        ckpt = {} if (only_pages or force) else self._load_ckpt(chapter, "storyboard")
+        ckpt_pages = ckpt.get("pages") if isinstance(ckpt.get("pages"), dict) else {}
         for page in pages:
             if only_pages and page.page not in only_pages:
                 continue
             key = self._template_for(chapter, page)
+            cached = ckpt_pages.get(str(page.page))
+            if not only_pages and not force and isinstance(cached, dict) and cached.get("template") == key and cached.get("raw") == page.raw and isinstance(cached.get("data"), dict):
+                done[page.page] = cached["data"]
+                self.emit("page", stage="storyboard", page=page.page)
+                continue
             prev = self._scene_summary(done[page.page - 1]) if (page.page - 1) in done else ""
             messages = prompts.storyboard_messages(self.project, page.raw, page.page, key, self.pages_data, prev)
 
@@ -307,6 +358,9 @@ class Adapter:
 
             panels = self._generate(chapter, "storyboard", "第 %d 頁" % page.page, messages, validate)
             done[page.page] = {"page": page.page, "template": key, "panels": panels}
+            if not only_pages:
+                ckpt_pages[str(page.page)] = {"template": key, "raw": page.raw, "data": done[page.page]}
+                self._save_ckpt(chapter, "storyboard", {"chapter": int(chapter), "pages": ckpt_pages})
             self.emit("page", stage="storyboard", page=page.page)
         storyboard = {"version": 1, "chapter": int(chapter), "title": title, "pages": [done[k] for k in sorted(done)]}
         try:                                           # 最後一道關卡：能不能整章編譯
@@ -315,7 +369,10 @@ class Adapter:
             self._dump(chapter, "storyboard_final.json", json.dumps(storyboard, ensure_ascii=False, indent=2))
             raise AdaptError("分鏡通過了檢查，卻無法編譯：%s（已存到 build/adapt/ch%03d/storyboard_final.json）" % (error, int(chapter)))
         self._write(path, json.dumps(storyboard, ensure_ascii=False, indent=2) + "\n")
+        if not only_pages:
+            self._clear_ckpt(chapter, "storyboard")
         self.emit("saved", stage="storyboard", path=str(path))
+        record_version(self.project, "storyboard ch%03d" % int(chapter))
         return storyboard
 
     def _normalize_panels(self, data, page_no):

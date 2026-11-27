@@ -111,14 +111,22 @@ def _shape(aspect):
 
 
 def panel_shapes(pages_data, key):
-    """某個模板每一格的（位置, 形狀）。"""
+    """某個模板每一格的（位置, 形狀）；斜格（V3）在形狀後面註明哪個角被切掉。"""
     page = pages_data["page"]
     left, top, right, bottom = layout.inner_rect(page)
     w, h = right - left, bottom - top
+    tpl = pages_data["templates"][str(key)]
     out = []
-    for box in pages_data["templates"][str(key)]["panels"]:
-        out.append((_position(box), _shape((box[2] - box[0]) * w / ((box[3] - box[1]) * h))))
+    for box, shape in zip(tpl["panels"], layout.template_shapes(tpl)):
+        text = _shape((box[2] - box[0]) * w / ((box[3] - box[1]) * h))
+        cut = layout.cut_corners(box, shape)
+        if cut:
+            text += "（斜格，%s角被切掉，重要的人與臉不要放在那個角）" % "、".join(cut)
+        out.append((_position(box), text))
     return out
+
+
+MOOD_TEXT = {"action": "斜格・動作"}
 
 
 def template_catalog(pages_data):
@@ -127,7 +135,8 @@ def template_catalog(pages_data):
     for key, tpl in pages_data["templates"].items():
         shapes = panel_shapes(pages_data, key)
         cells = "；".join("%d 格 %s·%s" % (i, p, s) for i, (p, s) in enumerate(shapes, 1))
-        lines.append("- 模板 %s「%s」共 %d 格：%s" % (key, tpl.get("name", ""), len(tpl["panels"]), cells))
+        mood = MOOD_TEXT.get(tpl.get("mood"), tpl.get("mood"))
+        lines.append("- 模板 %s「%s」%s共 %d 格：%s" % (key, tpl.get("name", ""), "（%s）" % mood if mood else "", len(tpl["panels"]), cells))
     return "\n".join(lines)
 
 
@@ -228,6 +237,7 @@ _PLAN_RULES = """# 任務：改編規劃
 2. **漫畫靠畫面說故事**：原著的心理描寫、環境描寫，能變成表情、動作、場景的就畫出來；必要時才用旁白或心聲。
 3. **一頁一個小節奏**：每頁有它的作用（建立場景／衝突升高／轉折／收尾），頁末最好留一個讓人想翻頁的點（懸念、轉折、情緒停頓）。
 4. **格數看節奏**：對話密集、情緒細膩的頁用 4–6 格；大場面、重要轉折用 1–3 格；不要整章都用同一個模板。
+   標「斜格・動作」的模板只用在打鬥、追逐、衝突爆發、情緒崩潰這類高張力的頁；日常、對話、說明的頁用直角模板。一章裡斜格頁不要超過三成。
 5. **一格只放一個瞬間**：一格裡的動作與台詞要能在同一個畫面裡成立，台詞每格最多 %(max)d 個對話框。
 6. **角色只能用聖經裡的 id**。原著出現、但聖經沒有角色卡的人物，不要放進格子，把名字列在 unlisted_characters。
 7. 被你刪掉或大幅濃縮的原著內容，簡短列在 omitted（一句話寫明刪了什麼、為什麼），方便人工檢查。
@@ -403,7 +413,8 @@ STORYBOARD_RULES = """# 任務：分鏡 JSON（一次一頁）
 10. **狀聲詞 sfx** 逐字照劇本；box 放在動作發生的地方旁邊，不要壓住角色的臉。沒有就省略。
 11. 鏡頭與角度對照劇本的鏡頭詞：%(shot_map)s；%(angle_map)s。可依畫面微調。
 12. 同一個角色在連續幾格的服裝要一致；沒有特別說明就用 default（省略 outfit 即可）。
-13. 只輸出 JSON，不要註解、不要加說明。""" % {
+13. **畫面裡不寫可讀的字**：螢幕、儀表、看板、文件、標語只寫「顯示什麼樣的東西」（例如 "a screen showing a pressure gauge dropping into the red zone"、"a huge screen showing an official emblem and a double-helix diagram"），**不要在 scene 或 objects.caption 裡寫出要顯示的文字、數字、標題或引號內容**（不要寫 "the screen reads -0.4"、"a sign saying EUGENICS LAW"、"a screen showing the law's title"）。生圖模型會照字面畫出來，而且常常拼錯；劇本裡的讀數或標語交給對話框與旁白。
+14. 只輸出 JSON，不要註解、不要加說明。""" % {
     "shots": "|".join(SHOT), "angles": "|".join(ANGLE), "kinds": "|".join(sorted(BUBBLE_KINDS)),
     "shot_map": "、".join("%s→%s" % kv for kv in SHOT_WORDS.items()),
     "angle_map": "、".join("%s→%s" % kv for kv in ANGLE_WORDS.items())}

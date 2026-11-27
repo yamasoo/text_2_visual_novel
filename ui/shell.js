@@ -16,9 +16,13 @@
     return nameCache.get(bookId);
   }
 
-  const BOOK_PAGES = [
-    ["", "章節"], ["cast", "角色表"], ["overview", "總覽"], ["bible", "設定集"],
-    ["assets", "素材"], ["audio", "音樂"], ["voice", "語音"], ["comic", "漫畫"], ["export", "輸出"], ["jobs", "任務紀錄"],
+  const COMIC_TABS = [
+    ["project", "專案與設定"],
+    ["chapter", "章節與劇本"],
+    ["storyboard", "分鏡"],
+    ["render", "出圖"],
+    ["letters", "嵌字"],
+    ["pages", "頁面與輸出"],
   ];
 
   async function navItems(route) {
@@ -26,20 +30,38 @@
     const bookId = parts[0] === "book" ? parts[1] : null;
     const items = [{ group: "書架" }, { label: "書架", href: "#/", page: "home" }];
     if (bookId) {
-      items.push({ group: "這本書" });
-      // 書名只是「這本書」的標題項：#/book/:id 由下面的「章節」負責亮，兩項才不會同時亮；
-      // 校對頁（book/:id/ch/:n）沒有自己的導覽項，由書名代表這一本。
-      items.push({ label: await bookName(bookId), href: `#/book/${bookId}`,
-        page: ["book/:id/ch/:n"] });
-      for (const [key, label] of BOOK_PAGES) {
-        items.push({
+      const title = await bookName(bookId);
+      const base = "#/book/" + bookId;
+      items.push(
+        { group: `${title} · 共用資源` },
+        { label: "總覽", href: `${base}/overview`, page: "book/:id/overview" },
+        { label: "角色與外觀", href: `${base}/appearance`, page: ["book/:id/appearance", "book/:id/cast"] },
+        { label: "地點與設定集", href: `${base}/bible`, page: "book/:id/bible" },
+
+        { group: "視覺小說（VN）" },
+        { label: "章節與校對", href: base, page: ["book/:id", "book/:id/ch/:n"] },
+        { label: "素材與畫風", href: `${base}/assets`, page: "book/:id/assets" },
+        { label: "音樂", href: `${base}/audio`, page: "book/:id/audio" },
+        { label: "語音", href: `${base}/voice`, page: "book/:id/voice" },
+        { label: "匯出 Ren'Py", href: `${base}/export`, page: "book/:id/export" },
+
+        { group: "漫畫（Comic）" },
+        ...COMIC_TABS.map(([key, label]) => ({
           label,
-          href: "#/book/" + bookId + (key ? "/" + key : ""),
-          page: key ? "book/:id/" + key : "book/:id",
-        });
-      }
+          href: `${base}/comic?tab=${key}`,
+          active: (r) => {
+            if (r.page !== "book/:id/comic") return false;
+            const cur = (r.query && r.query.tab) || (r.args && r.args[0]) || FE.store.get("comic_tab", "project") || "project";
+            return cur === key;
+          },
+        }))
+      );
     }
-    items.push({ group: "系統" }, { label: "設定", href: "#/settings", page: "settings" });
+    items.push({ group: "系統" });
+    if (bookId) {
+      items.push({ label: "任務紀錄", href: `#/book/${bookId}/jobs`, page: "book/:id/jobs" });
+    }
+    items.push({ label: "設定", href: "#/settings", page: "settings" });
     return items;
   }
 
@@ -98,14 +120,43 @@
     panel.resume().catch(FE.fail);
   }
 
+  const suiteLink = h("a", {
+    class: "chip",
+    href: "#",
+    target: "t2x_portal",
+    rel: "noopener",
+    hidden: true,
+    title: "回到 t2x-suite 跨管線總覽 Portal",
+  }, "Portal ↗");
+  const nsLink = h("a", {
+    class: "chip",
+    href: "#",
+    target: "novel_studio",
+    rel: "noopener",
+    hidden: true,
+    title: "回到 Novel Studio 編輯原著與設定集",
+  }, "Novel Studio ↗");
   const chip = h("a", { class: "chip", href: "#/settings", "data-llm-chip": "", title: "AI 設定" }, "AI");
+  const topSlot = h("div", { class: "row", style: "gap:6px;align-items:center" }, suiteLink, nsLink, chip);
+
+  FE.api("/api/settings").then((st) => {
+    const suite = (st && st.suite) || {};
+    if (suite.suite_url) {
+      suiteLink.href = suite.suite_url + "/";
+      suiteLink.hidden = false;
+    }
+    if (suite.ns_url) {
+      nsLink.href = suite.ns_url + "/";
+      nsLink.hidden = false;
+    }
+  }).catch(() => {});
 
   FE.shell.mount({
     brand: { label: "視覺小說工作台", mark: "幕" },
     nav: navItems,
     panel: mountPanel,
     panel_label: "AI",
-    slots: { top: chip },
+    slots: { top: topSlot },
     sizes: { nav: { width: 190 }, panel: { max: 720, width: 380 } },
   });
 

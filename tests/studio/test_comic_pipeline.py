@@ -498,7 +498,8 @@ def test_render_then_compose_then_pdf(pipeline, monkeypatch):
 
 def test_comic_settings_roundtrip(pipeline):
     config, root, _ = pipeline
-    assert comic.read_settings("demo", "ch001", config) == {"lettering": {}, "problems": []}
+    initial = comic.read_settings("demo", "ch001", config)
+    assert initial["lettering"] == {} and initial["problems"] == [] and initial["loras"] == []
     font = root / "font.ttf"
     font.write_bytes(b"ttf")
     saved = comic.save_settings("demo", "ch001", {"dialogue_font": str(font), "narration_pt": 10.5, "vertical": False}, config)
@@ -894,6 +895,18 @@ def test_export_cbz_without_storyboard_title(pipeline, monkeypatch):
     assert "<Number>1</Number>" in xml
     assert "<Title>遲到的便當　第 1 章</Title>" in xml
     assert "<PageCount>" in xml
+
+
+def test_export_png_zip_contains_only_page_pngs(pipeline, monkeypatch):
+    import zipfile
+
+    config, _ = _composed(pipeline, monkeypatch)
+    archive_path = Path(comic.export_file("demo", "ch001", 1, "zip", config=config))
+    assert archive_path.name == "ch001_ch001_png.zip"
+    with zipfile.ZipFile(archive_path) as archive:
+        names = archive.namelist()
+    assert names and all(name.endswith(".png") for name in names)
+    assert "ComicInfo.xml" not in names
 
 
 def test_render_more_adds_one_new_seed_per_panel(pipeline, monkeypatch):

@@ -40,7 +40,7 @@ NO_LINES = {"無台詞", "無對白", "沒有台詞"}
 MAX_BUBBLES = 3          # 一格最多幾個對話框（旁白也算，狀聲詞不算）
 MAX_LINE_CHARS = 45      # 單一對話框最多幾個字，再長就讀不下去了
 
-PAGE_RE = re.compile(r"^\s*#{1,4}\s*第\s*(\d+)\s*頁\s*(?:[（(]\s*模板\s*([0-9A-Za-z]+)\s*(?:[：:][^）)]*)?[）)])?\s*$")
+PAGE_RE = re.compile(r"^\s*#{1,4}\s*第\s*(\d+)\s*頁\s*(?:[（(]\s*模板\s*([0-9A-Za-z]+)\s*(?:[：:].*?)?[）)])?\s*$")
 PANEL_RE = re.compile(r"^\s*\*\*\s*(\d+)\s*格\s*\*\*\s*[｜|]\s*(.*?)\s*$")
 BULLET_RE = re.compile(r"^\s*[-*•]\s*(.*?)\s*$")
 LABEL_RE = re.compile(r"^(.+?)\s*[（(]\s*(.+?)\s*[）)]\s*$")

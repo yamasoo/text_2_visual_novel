@@ -54,7 +54,7 @@ def test_comic_page_composes_before_pdf():
 def test_comic_page_offers_cbz_and_settings():
     # N1：CBZ 後端早就有，介面也要有入口；N2／N3：漫畫設定與組版 warnings 全列。
     text = (UI / "page_comic.js").read_text(encoding="utf-8")
-    assert '["pdf", "cbz"]' in text
+    assert '["pdf", "下載 PDF"]' in text and '["cbz", "下載 CBZ"]' in text and '["zip", "下載 PNG（ZIP）"]' in text
     assert "/settings" in text and "saveSettings" in text and "lettering" in text
     assert "組版提醒" in text and "lastWarn" in text
 
@@ -191,3 +191,15 @@ def test_assets_style_shows_effective_profile():
     text = (UI / "page_assets.js").read_text(encoding="utf-8")
     assert "目前實際生效" in text and "s.resolved" in text
     assert "跟隨設定頁的預設 profile" in text and "inherited" in text   # D34：沒選 profile 時跟隨設定頁的預設
+
+
+def test_b2_scroll_reduction_ui_hooks():
+    settings = (UI / "page_settings.js").read_text(encoding="utf-8")
+    assert "page-head-sticky" in settings and 'TAB_KEY = "settings_tab"' in settings
+    assert '["ai", "AI 執行者"]' in settings and '["comfy", "ComfyUI（出圖）"]' in settings and '["general", "一般與路徑"]' in settings
+    shell = (UI / "shell.js").read_text(encoding="utf-8")
+    assert "共用資源" in shell and "視覺小說（VN）" in shell and "漫畫（Comic）" in shell and "COMIC_TABS" in shell
+    overview = (UI / "page_overview.js").read_text(encoding="utf-8")
+    assert "overview-grid" in overview and "scroll-table" in overview
+    appearance = (UI / "page_appearance.js").read_text(encoding="utf-8")
+    assert "master-detail" in appearance and "md-list" in appearance

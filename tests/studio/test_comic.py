@@ -170,3 +170,64 @@ def test_comic_cfg_uses_config_base_url():
     cfg = comic.comic_cfg()
     assert cfg["comfy"]["url"] == load_config().comfyui_base_url
     assert comic.render_profile()["workflow"].is_file()
+
+
+def test_project_style_and_loras_override_and_inject(env):
+    from dataclasses import replace
+
+    config, _ = env
+    config = replace(
+        config,
+        comfy_default_profile="anima",
+        comfy_profiles={
+            "anima": {
+                "kind": "anima", "workflow": "",
+                "models": {"unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors"},
+                "negative": "", "default_preset": "", "presets": {},
+                "loras": [{"name": "global_style.safetensors", "strength": 0.6, "on": True}],
+            },
+        },
+    )
+    comic.create_project("demo", "ch001", "大夜班", config=config)
+
+    # 先存字型，確認之後存畫風與 LoRA 不會蓋掉字型
+    comic.save_settings("demo", "ch001", {"dialogue_pt": 11.0}, config)
+    out = comic.save_settings(
+        "demo", "ch001", None, config,
+        project={
+            "comfy_profile": "anima",
+            "style_preset": "color",
+            "style": "watercolor manga",
+            "meta": "full color, soft light",
+            "look": "水彩彩漫",
+            "sfx_mode": "overlay",
+        },
+        loras=[
+            {"name": "proj_ink.safetensors", "strength": 0.8, "on": True},
+            {"name": "", "strength": 1.0, "on": True},   # 空白檔名自動略過
+        ],
+        lora_mode="append",
+    )
+    assert out["lettering"]["dialogue_pt"] == 11.0
+    assert out["project"]["style_preset"] == "color"
+    assert out["project"]["comfy_profile"] == "anima"
+    assert out["project"]["meta"] == ["full color", "soft light"]
+    assert out["loras"] == [{"name": "proj_ink.safetensors", "strength": 0.8, "on": True}]
+    assert out["lora_mode"] == "append"
+
+    # append 模式：全域 profile LoRA 在前、專案 LoRA 在後
+    cfg_append = comic.comic_cfg(config, out)
+    names_append = [x["name"] for x in cfg_append["comfy"]["profiles"]["anima"]["loras"]]
+    assert names_append == ["global_style.safetensors", "proj_ink.safetensors"]
+
+    # replace 模式：只用專案 LoRA
+    out_replace = comic.save_settings("demo", "ch001", None, config, lora_mode="replace")
+    cfg_replace = comic.comic_cfg(config, out_replace)
+    names_replace = [x["name"] for x in cfg_replace["comfy"]["profiles"]["anima"]["loras"]]
+    assert names_replace == ["proj_ink.safetensors"]
+
+    # 留空覆蓋欄位 → 清回預設
+    cleared = comic.save_settings("demo", "ch001", None, config, project={"comfy_profile": "", "style": "", "meta": "", "look": ""})
+    assert cleared["project"]["comfy_profile"] == ""
+    assert cleared["project"]["style"] == ""
+    assert cleared["project"]["meta"] == []

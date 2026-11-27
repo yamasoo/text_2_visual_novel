@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from . import layout
 
@@ -172,13 +172,18 @@ def page_panels(project, chapter, page, pages_data, picks):
         raise ComposeError("第 %s 頁：模板「%s」有 %d 格，分鏡的 slot 要剛好是 1–%d，目前是 %s"
                            % (page["page"], page["template"], len(boxes), len(boxes), sorted(panels)))
     cfg = pages_data["page"]
+    shapes = layout.template_shapes(tpl)
     result, warnings = [], []
     for slot, box in enumerate(boxes, 1):
         panel = panels[slot]
         pid = panel.get("id") or "p%03d_k%d" % (page["page"], slot)
         where = "第 %s 頁第 %d 格（%s）" % (page["page"], slot, pid)
+        poly = None
         try:
-            rect = layout.panel_rect_px(cfg, box)
+            if shapes[slot - 1] is None:
+                rect = layout.panel_rect_px(cfg, box)
+            else:                                        # 斜格（V3）：rect 是扣掉白邊後多邊形的外接矩形
+                poly, rect = layout.panel_poly_px(cfg, box, shapes[slot - 1])
         except layout.LayoutError as error:
             raise ComposeError("%s：%s" % (where, error))
         size = (rect[2] - rect[0], rect[3] - rect[1])
@@ -204,7 +209,8 @@ def page_panels(project, chapter, page, pages_data, picks):
             except OSError as error:
                 raise ComposeError("%s：讀不了圖 %s（%s）" % (where, source.name, error))
         result.append({"slot": slot, "id": pid, "where": where, "panel": panel, "rect": rect, "source": source,
-                       "focus": focus, "zoom": zoom, "window": window})
+                       "focus": focus, "zoom": zoom, "window": window,
+                       "poly": None if poly is None else [[round(x, 2), round(y, 2)] for x, y in poly]})
     return result, warnings
 
 
@@ -215,6 +221,17 @@ def auto_gray(project):
     出圖彩色、頁面卻變黑白（1.12.2 改掉）。畫風預設集的 gray 只是那個畫風的建議值，要不要套用由人決定。"""
     output = project.config.get("output") if isinstance(project.config.get("output"), dict) else {}
     return output.get("gray") is True
+
+
+SUPERSAMPLE = 4             # 斜格遮罩先放大畫再縮小：斜邊才不會有鋸齒
+
+
+def polygon_mask(size, points, ss=SUPERSAMPLE):
+    """size=(w, h) 的 L 遮罩，points（相對於左上角的像素座標）裡面是 255；邊緣反鋸齒。"""
+    w, h = size
+    big = Image.new("L", (w * ss, h * ss), 0)
+    ImageDraw.Draw(big).polygon([(x * ss, y * ss) for x, y in points], fill=255)
+    return big.resize((w, h), Image.BOX)              # BOX＝每個像素的覆蓋率；LANCZOS 會在邊緣外振鈴
 
 
 def compose_page(project, chapter, page, pages_data, picks, gray=None, numbers=False):
@@ -240,9 +257,18 @@ def compose_page(project, chapter, page, pages_data, picks, gray=None, numbers=F
                     tile = crop_cover(img.convert("L" if gray else "RGB"), size, info["focus"], info["zoom"])
             except OSError as error:
                 raise ComposeError("%s：讀不了圖 %s（%s）" % (where, source.name, error))
-        canvas.paste(tile, (rect[0], rect[1]))
-        if frame > 0:
-            draw.rectangle((rect[0], rect[1], rect[2] - 1, rect[3] - 1), outline=black, width=frame)
+        if info.get("poly") is None:
+            canvas.paste(tile, (rect[0], rect[1]))
+            if frame > 0:
+                draw.rectangle((rect[0], rect[1], rect[2] - 1, rect[3] - 1), outline=black, width=frame)
+        else:                                            # 斜格（V3）：矩形的圖用多邊形遮罩貼上，框線是一圈內縮的環
+            local = [(x - rect[0], y - rect[1]) for x, y in info["poly"]]
+            outer = polygon_mask(size, local)
+            canvas.paste(tile, (rect[0], rect[1]), outer)
+            if frame > 0:
+                inner = polygon_mask(size, layout.inset_polygon(local, [frame] * len(local)))
+                ring = ImageChops.subtract(outer, inner)
+                canvas.paste(Image.new(mode, size, black), (rect[0], rect[1]), ring)
         if numbers:
             _label(draw, rect, str(slot), 0, max(36, size[1] // 10 if size[1] < 600 else 60))
         if source is None:

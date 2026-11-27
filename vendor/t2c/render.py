@@ -8,7 +8,7 @@
 """
 from . import comfy, compose, workspace
 from .compile import CompileError, compile_chapter
-from .project import ProjectError
+from .project import ProjectError, record_version
 
 
 class RenderError(Exception):
@@ -106,31 +106,35 @@ def render_jobs(project, chapter, jobs, cfg, preset_name=None, force=False, shou
         names = [comfy.render_name(job["id"], seed, chosen, default, profile["name"], default_profile) for seed in seeds]
         if force or any(not (folder / name).exists() for name in names):
             save_job(build, job)
-    for i, (job, seed) in enumerate(todo, 1):
-        if stop():
-            raise Cancelled()
-        name = comfy.render_name(job["id"], seed, chosen, default, profile["name"], default_profile)
-        target = folder / name
-        event = {"done": i, "total": len(todo), "id": job["id"], "seed": seed, "file": name, "size": (job["width"], job["height"]),
-                 "profile": profile["name"]}
-        if target.exists() and not force:
-            if on_event:
-                on_event(dict(event, kind="skip"))
-            continue
-        if on_event:
-            on_event(dict(event, kind="start"))
-        try:
-            negative = job["negative"] or profile.get("negative") or ""
-            wf, out_id = comfy.prepare(workflow, job["prompt"], negative, seed, job["width"], job["height"],
-                                       models=profile.get("models"), prefix="text2comics/%s" % compose.chapter_name(chapter),
-                                       preset=preset, loras=profile.get("loras"), profile_name=profile["name"])
-            data = comfy.run(profile["base_url"], wf, out_id, should_stop=stop)
-        except comfy.ComfyError as error:
+    try:
+        for i, (job, seed) in enumerate(todo, 1):
             if stop():
                 raise Cancelled()
-            raise RenderError("%s（%s seed %d，profile %s）" % (error, job["id"], seed, profile["name"]))
-        target.write_bytes(data)
-        written.append(name)
-        if on_event:
-            on_event(dict(event, kind="render"))
+            name = comfy.render_name(job["id"], seed, chosen, default, profile["name"], default_profile)
+            target = folder / name
+            event = {"done": i, "total": len(todo), "id": job["id"], "seed": seed, "file": name, "size": (job["width"], job["height"]),
+                     "profile": profile["name"]}
+            if target.exists() and not force:
+                if on_event:
+                    on_event(dict(event, kind="skip"))
+                continue
+            if on_event:
+                on_event(dict(event, kind="start"))
+            try:
+                negative = job["negative"] or profile.get("negative") or ""
+                wf, out_id = comfy.prepare(workflow, job["prompt"], negative, seed, job["width"], job["height"],
+                                           models=profile.get("models"), prefix="text2comics/%s" % compose.chapter_name(chapter),
+                                           preset=preset, loras=profile.get("loras"), profile_name=profile["name"])
+                data = comfy.run(profile["base_url"], wf, out_id, should_stop=stop)
+            except comfy.ComfyError as error:
+                if stop():
+                    raise Cancelled()
+                raise RenderError("%s（%s seed %d，profile %s）" % (error, job["id"], seed, profile["name"]))
+            target.write_bytes(data)
+            written.append(name)
+            if on_event:
+                on_event(dict(event, kind="render"))
+    finally:
+        if written:                                    # 中途停止也記下已經畫好的張數（V1f-3）
+            record_version(project, "render %s %d 張（profile %s）" % (compose.chapter_name(chapter), len(written), profile["name"]))
     return written

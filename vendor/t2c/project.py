@@ -15,6 +15,7 @@ config.json 的 comfy.profiles 其中一組。
 """
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -163,3 +164,20 @@ class Project:
         path = self.root.joinpath(*parts)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+
+VERSION_LOG = "version.txt"
+
+
+def record_version(project, action):
+    """在 <專案>/build/version.txt 加一行「時間、t2c 版本、做了什麼」（V1f-3）。
+    以後對照實機紀錄時，不必再用檔案時間戳去猜是哪一版產生的。寫不進去也不影響工作（只是少一行紀錄）。"""
+    from . import __version__
+    try:
+        folder = Path(project.root) / "build"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / VERSION_LOG).open("a", encoding="utf-8") as handle:
+            handle.write("%s\tt2c %s\t%s\n" % (datetime.now().isoformat(timespec="seconds"), __version__, action))
+    except (OSError, AttributeError, TypeError):
+        pass
+

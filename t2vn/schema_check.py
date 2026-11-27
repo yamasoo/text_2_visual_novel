@@ -32,6 +32,7 @@ SCHEMA_FILES = {
     "cast_voice": "cast_voice.schema.json",
     "voice_map": "voice_map.schema.json",
     "letters": "letters.schema.json",
+    "appearance_card": "appearance_card.schema.json",
 }
 
 PLAYER_ID = "player"

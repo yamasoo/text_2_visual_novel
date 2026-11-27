@@ -254,9 +254,11 @@ def sprite_prompt(
     ]
     if character_tags:
         parts.append(character_tags)
+    custom_expr = (entry.get("expression_prompts") or {}).get(expr) if isinstance(entry, dict) else None
+    expr_text = custom_expr.strip() if isinstance(custom_expr, str) and custom_expr.strip() else EXPR_TAGS[expr]
     parts.extend(
         [
-            EXPR_TAGS[expr],
+            expr_text,
             "standing",
             "full body",
             "looking at viewer",
@@ -307,7 +309,9 @@ def headshot_prompt(
     parts = [merged.get("quality"), merged.get("safety"), _artist_tags(merged.get("artist")), "solo"]
     if character_tags:
         parts.append(character_tags)
-    parts.extend([EXPR_TAGS[expr], "portrait", "face focus", "looking at viewer", "simple background",
+    custom_expr = (entry.get("expression_prompts") or {}).get(expr) if isinstance(entry, dict) else None
+    expr_text = custom_expr.strip() if isinstance(custom_expr, str) and custom_expr.strip() else EXPR_TAGS[expr]
+    parts.extend([expr_text, "portrait", "face focus", "looking at viewer", "simple background",
                   "white background", merged.get("extra"), section.get("extra")])
     return {
         "positive": normalize_tags(_join_tags(*parts)) + ".",

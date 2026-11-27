@@ -15,7 +15,7 @@ import os
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from . import compose, layout
 
@@ -338,6 +338,7 @@ def save_letters(project, chapter, letters):
 
 CENTER_PUNCT = set("，。、．・,.")                                   # 放在字格正中（台灣直排習慣）
 ROTATE = set("「」『』（）()〈〉《》【】〔〕［］｛｝[]{}：；:;～〜ー—─–-…‥⋯")   # 直排時轉 90 度
+MARGIN_OF_POLY = 3        # 斜格：多邊形再往內縮幾個像素才算放得下（框線之外的一點空隙）
 RUNS = set("…‥⋯—─ー～〜")                                          # 連續的不拆開
 NO_START = set("，。、．・：；！？」』）》〉】〕］｝…‥⋯～〜ー—々,.!?:;)]}")  # 不放欄首
 NO_END = set("「『（《〈【〔［｛([{")                                # 不放欄尾
@@ -345,9 +346,49 @@ TCY_PAIRS = {"！？", "？！", "！！", "？？", "!?", "?!", "!!", "??"}
 ASCII_RUN = re.compile(r"[A-Za-z0-9!?'\"&%#+=*/.,:;@$-]+")
 
 
+HALF_TO_FULL = {"!": "！", "?": "？", ",": "，", ";": "；", ":": "："}
+
+
+def _is_cjk(ch):
+    """中日文字與全形標點（直排時要用全形標點的那一側）。"""
+    return bool(ch) and ord(ch) >= 0x2E80
+
+
+def _neighbors(chars, i):
+    """i 左右最近的非空白字元（找不到給空字串）。"""
+    left = next((c for c in reversed(chars[:i]) if not c.isspace()), "")
+    right = next((c for c in chars[i + 1:] if not c.isspace()), "")
+    return left, right
+
+
+def vertical_punct(text):
+    """直排顯示用的標點正規化（V1f-2）：只改畫出來的字，不改原著、劇本、分鏡。
+    - 緊貼中文的半形 !?,;: → 全形（「前進!」→「前進！」）；英數之間的不動（「OK!」「3:15」照舊）。
+    - 半形雙引號 " 與彎引號 “” → 「」。成對的照順序配；一個框裡只有一個 " 時，看位置：開頭當「、結尾當」
+      （原著一段引言常被切成兩個框：第一個只有開引號、最後一個只有關引號）。"""
+    chars = list(str(text or "").replace("“", "「").replace("”", "」"))
+    for i, ch in enumerate(chars):
+        if ch in HALF_TO_FULL:
+            left, right = _neighbors(chars, i)
+            if _is_cjk(left) or (not left and _is_cjk(right)):
+                chars[i] = HALF_TO_FULL[ch]
+    quotes = [i for i, ch in enumerate(chars) if ch == '"']
+    if quotes:
+        stripped = "".join(chars).strip()
+        closing_first = len(quotes) % 2 == 1 and not stripped.startswith('"') and stripped.endswith('"')
+        for n, i in enumerate(quotes):
+            opening = (n % 2 == 1) if closing_first else (n % 2 == 0)
+            chars[i] = "「" if opening else "」"
+    return "".join(chars)
+
+
 def tokenize(text, vertical=True):
-    """台詞 → 排字單位 [kind, 文字, 佔幾格]；kind：c 一般、p 置中標點、r 旋轉、t 縱中橫、br 強制換欄。"""
-    units, i, text = [], 0, str(text or "").replace("\r\n", "\n")
+    """台詞 → 排字單位 [kind, 文字, 佔幾格]；kind：c 一般、p 置中標點、r 旋轉、t 縱中橫、br 強制換欄。
+    直排時先做 vertical_punct()（半形標點與引號換成直排用的全形）。"""
+    text = str(text or "").replace("\r\n", "\n")
+    if vertical:
+        text = vertical_punct(text)
+    units, i = [], 0
     while i < len(text):
         ch = text[i]
         if ch == "\n":
@@ -679,7 +720,25 @@ def _outer_box(item):
     return [item["cx"] - item["ox"], item["cy"] - item["oy"], item["cx"] + item["ox"], item["cy"] + item["oy"]]
 
 
-def _place(kind, rx, ry, anchor, rect, margin, faces, bodies, placed, cell, objects=()):
+OUTSIDE_COST = 60.0       # 斜格（V3）：對話框有一部分落在多邊形外（被切掉的角）——比壓到臉還貴
+
+
+def _outline_points(kind, cx, cy, ox, oy):
+    """對話框外框上的取樣點：方框取四角與四邊中點，其他（橢圓、雲、爆炸）取橢圓上 12 點。"""
+    if kind == "narration":
+        return [(cx + sx * ox, cy + sy * oy) for sx in (-1, 0, 1) for sy in (-1, 0, 1) if sx or sy]
+    return [(cx + ox * math.cos(a), cy + oy * math.sin(a)) for a in (2 * math.pi * k / 12 for k in range(12))]
+
+
+def outside_fraction(kind, cx, cy, ox, oy, poly):
+    """對話框外框有多少比例落在多邊形外（poly 是 None＝直角格，一律 0）。"""
+    if not poly:
+        return 0.0
+    points = _outline_points(kind, cx, cy, ox, oy)
+    return sum(1 for x, y in points if not layout.point_in_polygon(x, y, poly)) / len(points)
+
+
+def _place(kind, rx, ry, anchor, rect, margin, faces, bodies, placed, cell, objects=(), poly=None):
     """在格子裡找對話框中心：成本＝離 anchor 的距離＋壓到臉／其他對話框／重要物件／身體＋閱讀順序。
     回傳 (cx, cy, face_hit)。"""
     ox, oy = outer_axes(kind, rx, ry)
@@ -712,6 +771,8 @@ def _place(kind, rx, ry, anchor, rect, margin, faces, bodies, placed, cell, obje
                     cost += ORDER_COST                   # 右翻時會先讀到這一個（順序顛倒）
             cost += 0.4 * sum(shape_overlap(shape, b) for b in bodies) / area
             cost += 3 * sum(shape_overlap(shape, o) / max(_area(o), 1.0) for o in objects)
+            if poly:
+                cost += OUTSIDE_COST * outside_fraction(kind, cx, cy, ox, oy, poly)
             if best is None or cost < best[0]:
                 best = (cost, cx, cy, face_hit)
     return best[1], best[2], best[3]
@@ -755,9 +816,15 @@ def plan_page(project, chapter, page, pages_data, picks, letters, settings):
             if mapped and _area(mapped) < 0.5:                 # 蓋住大半格的物件（特寫）不算
                 objects.append(_box_px(mapped, rect))
         inner = [rect[0] + frame, rect[1] + frame, rect[2] - frame, rect[3] - frame]     # 框線以內：尾巴伸出去會被框切掉
+        poly = None
+        if info.get("poly"):                     # 斜格（V3）：對話框要放在框線以內的多邊形裡，畫的時候也照它裁
+            poly = [(x, y) for x, y in layout.inset_polygon([tuple(p) for p in info["poly"]], [frame + MARGIN_OF_POLY] * len(info["poly"]))]
+            clip_poly = layout.inset_polygon([tuple(p) for p in info["poly"]], [frame] * len(info["poly"]))
         out = {"id": info["id"], "slot": info["slot"], "rect": list(rect), "window": window,
                "faces": [[round(v, 1) for v in f] for f in faces], "faces_auto": tweak["faces"] is None,
                "bubbles": [], "sfx": []}
+        if poly:
+            out["poly"] = [[round(x, 1), round(y, 1)] for x, y in clip_poly]
 
         bubbles = panel.get("bubbles") or []
         if len(tweak["bubbles"]) > len(bubbles):
@@ -797,7 +864,10 @@ def plan_page(project, chapter, page, pages_data, picks, letters, settings):
                 shape = {"kind": kind, "cx": cx, "cy": cy, "rx": ox, "ry": oy}
                 face_hit = sum(shape_overlap(shape, f) / max(_area(f), 1.0) for f in faces)
             else:
-                cx, cy, face_hit = _place(kind, rx, ry, anchor, rect, margin, faces, bodies, placed, cell, objects)
+                cx, cy, face_hit = _place(kind, rx, ry, anchor, rect, margin, faces, bodies, placed, cell, objects, poly)
+            if poly and outside_fraction(kind, cx, cy, ox, oy, poly) > 0:
+                warn("%s 第 %d 個對話框（%s）：有一部分在斜格被切掉的角裡，會被裁掉，請在介面調整或縮短台詞"
+                     % (where, index + 1, _quote(text)))
             if face_hit > 0.02:
                 warn("%s 第 %d 個對話框（%s）：壓到臉了，請在介面調整" % (where, index + 1, _quote(text)))
             item = {"kind": kind, "cx": cx, "cy": cy, "rx": rx, "ry": ry, "ox": ox, "oy": oy}
@@ -1198,10 +1268,19 @@ def draw_page(canvas, plan, settings, guides=False):
     """把 plan_page() 的結果畫到 canvas（就地修改）。"""
     for panel in plan["panels"]:
         rect = panel["rect"]
+        keep = None
+        if panel.get("poly"):                    # 斜格（V3）：先記下原圖，畫完再把多邊形外（框線、白邊）還原
+            box = tuple(int(round(v)) for v in rect)
+            keep = (box, canvas.crop(box))
         for s in panel["sfx"]:                               # 狀聲詞在下、對話框在上
             render_sfx(canvas, rect, s, settings)
         for b in panel["bubbles"]:
             render_bubble(canvas, rect, b, settings, "%s#%d" % (panel["id"], b["index"]))
+        if keep is not None:
+            box, original = keep
+            local = [(x - box[0], y - box[1]) for x, y in panel["poly"]]
+            outside = ImageChops.invert(compose.polygon_mask(original.size, local))
+            canvas.paste(original, box[:2], outside)
     if guides:
         draw_guides(canvas, plan)
     return canvas

@@ -283,8 +283,11 @@ def compile_chapter(project, storyboard, pages_data=None, only_page=None, overri
 
 
 def save_job(build_dir, job):
-    """把一格的工作寫成 build/<章>/<格>.prompt.json（layout 已展開，方便人看；prompt 字串不重複存）。"""
+    """把一格的工作寫成 build/<章>/<格>.prompt.json（layout 已展開，方便人看；prompt 字串不重複存）。
+    t2c_version：寫這份檔的 t2c 版本（出圖或補記指紋時；V1f-3），只供對照紀錄，過期判斷不看它。"""
+    from . import __version__
     path = build_dir / ("%s.prompt.json" % job["id"])
-    path.write_text(json.dumps({k: v for k, v in job.items() if k != "prompt"}, ensure_ascii=False, indent=2),
-                    encoding="utf-8")
+    data = {k: v for k, v in job.items() if k != "prompt"}
+    data["t2c_version"] = __version__
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

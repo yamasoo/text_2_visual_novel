@@ -9,6 +9,14 @@ FE.PAGES.home = async (ctx) => {
     FE.api("/api/state", { signal: ctx.signal }),
     FE.api("/api/books", { signal: ctx.signal }),
   ]);
+  const srcHint = (ctx.query && ctx.query.source) ? String(ctx.query.source).trim() : "";
+  if (srcHint) {
+    const existing = (data.books || []).find((b) => b.source_dir === srcHint || b.book_id === srcHint);
+    if (existing) {
+      FE.go(`#/book/${encodeURIComponent(existing.book_id)}`);
+      return;
+    }
+  }
   const shelf = h("div", { class: "shelf" }, data.books.map((b) => {
     const pct = b.chapters ? Math.round((100 * b.reviewed) / b.chapters) : 0;
     return h("a", { class: "card book", href: `#/book/${b.book_id}` },
@@ -18,6 +26,10 @@ FE.PAGES.home = async (ctx) => {
   }));
   ctx.view(h("h1", {}, "書架"), data.books.length ? shelf : h("p", { class: "muted" }, "還沒有書。從下面匯入第一本。"),
     importPanel(data, state));
+  if (srcHint) {
+    const candidate = (data.library || []).find((entry) => entry.dir_name === srcHint);
+    if (candidate) importLibrary(candidate);
+  }
 };
 
 function importPanel(data, state) {
@@ -39,18 +51,58 @@ function libraryTab(data, state) {
   if (!state.library_exists) return h("p", { class: "muted" }, `找不到書庫資料夾：${state.library}（請檢查 config.yaml 的 book_library.path）`);
   if (!data.library.length) return h("p", { class: "muted" }, `書庫 ${state.library} 裡沒有尚未匯入的書。書庫是唯讀的，只會讀取，不會修改。`);
   return h("table", {}, h("tbody", {}, data.library.map((entry) => h("tr", {},
-    h("td", {}, entry.dir_name), h("td", { class: "muted" }, `${entry.chapters} 個章節檔`),
+    h("td", {},
+      h("strong", {}, entry.title || entry.dir_name),
+      entry.title && entry.title !== entry.dir_name ? h("span", { class: "muted small", style: "margin-left:6px" }, entry.dir_name) : "",
+      entry.layout === "v3" ? h("span", { style: "margin-left:6px" }, badge("v3", "info")) : ""),
+    h("td", { class: "muted small" },
+      `${entry.chapters} 章` + (entry.visual_cards ? ` · 視覺卡 ${entry.visual_cards} 張` : "")),
     h("td", {}, h("button", { class: "primary sm", onclick: () => importLibrary(entry) }, "匯入…"))))));
 }
 
-async function importLibrary(entry) {
-  const bookId = await ask("書的 ID（小寫英文、數字、底線，例如 sample_book）：");
-  if (!bookId) return;
-  try {
-    await FE.api("/api/import/library", { body: { dir_name: entry.dir_name, book_id: bookId, display_name: entry.dir_name } });
-    toast("匯入完成");
-    FE.go("#/book/" + encodeURIComponent(bookId));
-  } catch (error) { fail(error); }
+function importLibrary(entry) {
+  const nameInput = h("input", { value: entry.title || entry.dir_name, style: "width:100%", "data-autofocus": "" });
+  const idInput = h("input", { value: entry.suggested_id || "", placeholder: "留空自動產生", style: "width:100%" });
+  const initComicBox = h("input", { type: "checkbox", checked: FE.store.get("import_init_comic", true) });
+  initComicBox.onchange = () => FE.store.set("import_init_comic", initComicBox.checked);
+
+  const run = async (close, goComic) => {
+    const id = idInput.value.trim();
+    if (id && !/^[a-z][a-z0-9_]{1,30}$/.test(id)) {
+      return toast("內部 ID 只能用小寫英文、數字、底線，並以英文字母開頭（2–31 字）；或直接留空自動產生", "bad");
+    }
+    const initComic = goComic || initComicBox.checked;
+    close();
+    try {
+      const r = await FE.api("/api/import/library", {
+        body: {
+          dir_name: entry.dir_name,
+          book_id: id,
+          display_name: nameInput.value.trim() || entry.title || entry.dir_name,
+          lang: entry.lang || "",
+          init_comic: initComic,
+        },
+      });
+      const vc = r.visual_cards && r.visual_cards.created ? r.visual_cards.created.length : 0;
+      toast("匯入完成" + (vc ? `（已帶入 ${vc} 張視覺卡）` : "") + (r.comic_project ? "（已建立漫畫專案）" : ""), "ok");
+      FE.go(goComic ? `#/book/${encodeURIComponent(r.book_id)}/comic` : `#/book/${encodeURIComponent(r.book_id)}`);
+    } catch (error) { fail(error); }
+  };
+
+  FE.modal({
+    title: "匯入書庫書籍",
+    body: h("div", { class: "stack" },
+      h("div", {}, h("div", { class: "small muted" }, "顯示書名"), nameInput),
+      h("label", { class: "row small", style: "align-items:center;gap:6px" }, initComicBox, "同時建立漫畫專案（並同步角色卡，之後 VN 與漫畫共用同一份原著與角色）"),
+      h("details", {},
+        h("summary", { class: "small muted", style: "cursor:pointer" }, `進階：自訂內部 ID（預設 ${entry.suggested_id || "自動產生"}）`),
+        h("div", { style: "margin-top:6px" }, idInput, h("div", { class: "small muted" }, "一般不需要修改；留空會自動產生不重複的英文 ID。")))),
+    foot: (close) => [
+      h("button", { class: "btn", type: "button", onclick: () => close() }, "取消"),
+      h("button", { class: "btn", type: "button", onclick: () => run(close, true) }, "匯入並前往漫畫"),
+      h("button", { class: "btn btn-primary", type: "button", onclick: () => run(close, false) }, "匯入（前往 VN）"),
+    ],
+  });
 }
 
 function fileTab(pasteOnly) {
@@ -88,8 +140,11 @@ function fileTab(pasteOnly) {
 
 function previewTable(data, form) {
   const skip = new Set(), titles = {};
-  const bookId = h("input", { placeholder: "book_id（英文）", pattern: "[a-z][a-z0-9_]{1,30}", style: "width:160px" });
-  const nameInput = h("input", { placeholder: "書名" });
+  const firstSrc = (data.sources && data.sources[0] && data.sources[0].name) ? data.sources[0].name.replace(/\.[^.]+$/, "") : "";
+  const nameInput = h("input", { value: firstSrc, placeholder: "書名（可中文）", style: "width:200px" });
+  const bookId = h("input", { placeholder: "內部 ID（留空自動產生）", pattern: "[a-z][a-z0-9_]{1,30}", style: "width:180px" });
+  const initComicBox = h("input", { type: "checkbox", checked: FE.store.get("import_init_comic", true) });
+  initComicBox.onchange = () => FE.store.set("import_init_comic", initComicBox.checked);
   const rows = data.chapters.map((c) => h("tr", {},
     h("td", {}, h("input", { type: "checkbox", checked: true, onchange: (e) => { e.target.checked ? skip.delete(c.no) : skip.add(c.no); } })),
     h("td", {}, c.no),
@@ -97,20 +152,32 @@ function previewTable(data, form) {
     h("td", {}, c.chars),
     h("td", {}, c.flags.map((f) => badge(f, "warn"))),
     h("td", { class: "muted small" }, c.head)));
-  const commit = async () => {
+  const commit = async (goComic) => {
     const id = bookId.value.trim();
-    if (!/^[a-z][a-z0-9_]{1,30}$/.test(id)) return toast("book_id 只能用小寫英文、數字、底線，並以英文字母開頭（2–31 字）", "bad");
+    if (id && !/^[a-z][a-z0-9_]{1,30}$/.test(id)) return toast("內部 ID 只能用小寫英文、數字、底線，並以英文字母開頭（2–31 字）；或留空自動產生", "bad");
     try {
-      await api("/api/import/commit", { body: { files: form.files, paths: form.paths, text: form.text, book_id: id, display_name: nameInput.value.trim() || id,
-        opts: { ...form.opts, skip: [...skip], titles } } });
-      toast("匯入完成"); FE.go(`#/book/${id}`);
+      const r = await api("/api/import/commit", {
+        body: {
+          files: form.files, paths: form.paths, text: form.text,
+          book_id: id, display_name: nameInput.value.trim() || id,
+          init_comic: goComic || initComicBox.checked,
+          opts: { ...form.opts, skip: [...skip], titles },
+        },
+      });
+      toast("匯入完成" + (r.comic_project ? "（已建立漫畫專案）" : ""), "ok");
+      FE.go(goComic ? `#/book/${r.book_id}/comic` : `#/book/${r.book_id}`);
     } catch (error) { fail(error); }
   };
   return h("div", {},
     data.warnings.map((w) => h("div", { class: chipClass("warn"), style: "display:block;margin:4px 0;white-space:normal" }, w)),
     h("div", { style: "max-height:300px;overflow:auto;margin:8px 0" }, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "匯入"), h("th", {}, "章號"), h("th", {}, "章名"), h("th", {}, "字數"), h("th", {}, "提醒"), h("th", {}, "開頭"))), h("tbody", {}, rows))),
-    h("div", { class: "row" }, bookId, nameInput, h("button", { class: "primary", onclick: commit }, `匯入 ${data.chapters.length} 章`)));
+    h("div", { class: "row" },
+      nameInput,
+      bookId,
+      h("label", { class: "row small", style: "align-items:center;gap:4px" }, initComicBox, "同時建立漫畫專案"),
+      h("button", { class: "primary", onclick: () => commit(false) }, `匯入 ${data.chapters.length} 章`),
+      h("button", { onclick: () => commit(true) }, "匯入並前往漫畫")));
 }
 
 function fileToBase64(file) {
@@ -165,13 +232,67 @@ async function viewBook(bookId, tab, ctx) {
     } catch (error) { fail(error); }
   }
 
+  async function syncLibraryChapters() {
+    try {
+      const diff = await FE.api(`/api/books/${bookId}/chapters/sync-library`);
+      if (!diff.has_library) return toast("這本書沒有對應的書庫資料夾", "bad");
+      if (!diff.added.length && !diff.modified.length) {
+        return toast(`書庫章節已是最新（共 ${diff.unchanged} 章）`, "ok");
+      }
+      const includeMod = h("input", { type: "checkbox", checked: false });
+      const parts = [];
+      if (diff.added.length) {
+        const list = diff.added.map((c) => `第 ${c.chapter_no} 章 ${c.title}`).slice(0, 8).join("、")
+          + (diff.added.length > 8 ? `…（共 ${diff.added.length} 章）` : "");
+        parts.push(h("div", {}, h("strong", {}, `新增 ${diff.added.length} 章：`), list));
+      }
+      if (diff.modified.length) {
+        const list = diff.modified.map((c) => `第 ${c.chapter_no} 章` + (c.has_scenes ? "（已有劇本）" : "")).slice(0, 8).join("、")
+          + (diff.modified.length > 8 ? `…（共 ${diff.modified.length} 章）` : "");
+        parts.push(
+          h("div", {}, h("strong", {}, `原稿已修訂 ${diff.modified.length} 章：`), list),
+          h("label", { class: "row small", style: "align-items:center;gap:6px" },
+            includeMod, "一併更新原稿已修訂的舊章（僅更新正文段落，不動既有 VN 劇本）")
+        );
+      }
+      FE.modal({
+        title: "從 Novel Studio 書庫同步章節",
+        body: h("div", { class: "stack" }, ...parts),
+        foot: (close) => [
+          h("button", { class: "btn", type: "button", onclick: () => close() }, "取消"),
+          h("button", {
+            class: "btn btn-primary",
+            type: "button",
+            onclick: async () => {
+              close();
+              try {
+                const r = await FE.api(`/api/books/${bookId}/chapters/sync-library`, {
+                  method: "POST",
+                  body: { include_modified: includeMod.checked },
+                });
+                const msg = `同步完成：新增 ${r.added.length} 章` + (r.updated.length ? `、更新 ${r.updated.length} 章` : "");
+                toast(msg, "ok");
+                if (r.added.length || r.updated.length) FE.route();
+              } catch (err) { fail(err); }
+            },
+          }, "開始同步"),
+        ],
+      });
+    } catch (error) { fail(error); }
+  }
+  const hasLibrary = data.book && data.book.source && data.book.source.kind === "library";
+
   const chapterPane = h("div", {},
-    h("div", { class: "row card" },
-      h("button", { onclick: () => runJob("extract") }, "抽取章綱與角色"),
-      h("button", { class: "primary", onclick: () => runJob("annotate") }, "AI 標註"),
-      h("label", { class: "small" }, force, " 覆蓋已有結果"),
-      h("span", { class: "grow" }),
-      h("button", { onclick: buildProto }, "建立可玩原型（勾選章；不勾＝全部）")),
+    h("div", { class: "card" },
+      h("div", { class: "row" },
+        h("button", { title: "讀正文建立各章章綱與角色表", onclick: () => runJob("extract") }, "抽取章綱與角色"),
+        h("button", { class: "primary", title: "把小說正文拆成視覺小說的場、旁白、台詞、說話者、表情、背景地點與 BGM（寫入 scenes/）", onclick: () => runJob("annotate") }, "AI 標註（轉 VN 劇本）"),
+        h("label", { class: "small" }, force, " 覆蓋已有結果"),
+        h("span", { class: "grow" }),
+        hasLibrary ? h("button", { title: "唯讀檢查書庫是否有續寫的新章節，安全增量匯入（不動已校對劇本）", onclick: syncLibraryChapters }, "同步書庫新章") : "",
+        h("button", { onclick: buildProto }, "建立可玩原型（勾選章；不勾＝全部）")),
+      h("div", { class: "small muted", style: "margin-top:8px" },
+        "流程：① 抽取章綱與角色（建立章綱與角色表）→ ② AI 標註（將正文拆成 VN 場景、說話者、表情、背景地點與 BGM）→ ③ 逐章校對 → ④ 建立原型或到「素材與畫風」生圖。")),
     h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, pickAll), h("th", {}, "章"), h("th", {}, "章名"), h("th", {}, "字數"), h("th", {}, "章綱"), h("th", {}, "標註"), h("th", {}, "場數"), h("th", {}))), h("tbody", {}, rows)));
   const tabs = h("div", { class: "tabs" },
     h("a", { class: tabClass(tab === "chapters"), href: `#/book/${bookId}` }, "章節"),
@@ -194,7 +315,9 @@ async function castPane(bookId, lang, ctx) {
         h("td", {}, isPlayer ? "" : h("input", { type: "number", min: 0, max: 360, value: c.hue ?? 0, style: "width:64px", oninput: (e) => { c.hue = Number(e.target.value); } })),
         h("td", {}, isPlayer ? "" : select(SHAPES, c.shape || "small", (v) => { c.shape = v; })),
         h("td", {}, isPlayer ? "" : h("input", { value: (c.one_line || {})[lang] || "", oninput: (e) => { c.one_line = e.target.value ? { [lang]: e.target.value } : undefined; } })),
-        h("td", {}, isPlayer ? "" : h("button", { class: "ghost sm", title: "刪除", onclick: () => { delete chars[id]; draw(); } }, "✕")));
+        h("td", { style: "white-space:nowrap" }, isPlayer ? "" : h("span", { class: "row", style: "gap:4px" },
+          h("a", { class: "btn sm", href: `#/book/${encodeURIComponent(bookId)}/appearance?char=${encodeURIComponent(id)}` }, "外觀 →"),
+          h("button", { class: "ghost sm", title: "刪除", onclick: () => { delete chars[id]; draw(); } }, "✕"))));
     }));
   }
   draw();

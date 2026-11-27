@@ -228,8 +228,9 @@ def save_registry(work: Path, doc: dict[str, Any]) -> None:
     if errors:
         raise ValueError("; ".join(errors))
     path = work / REGISTRY_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_dump(doc), encoding=UTF8)
+    from .atomic import write_atomic
+
+    write_atomic(path, _dump(doc), encoding=UTF8)
 
 
 def _check_kind(kind: Any) -> str:
@@ -301,7 +302,142 @@ def remove_entry(work: Path, kind: str, entry_id: str) -> bool:
     return True
 
 
+def merge_entries(
+    work: Path,
+    kind: str,
+    target_id: str,
+    source_ids: list[str],
+    assert_writable: Any = None,
+) -> dict[str, Any]:
+    """把 ``source_ids`` 合併到 ``target_id``：
+
+    - 合併 ``bible.json`` 的 ``label``／``note``／``prompt``（保留 target 既有非空值，空欄由來源補上）
+    - 若為 ``locations``，一併合併 ``art/style.json`` 的地點描述與標籤
+    - 同步改寫 ``scenes/`` 與 ``gold/`` 裡引用到來源 ID 的場景（寫前備份至 ``_history/``）
+    - 刪除多餘的來源註冊表與 style 條目
+    """
+    from . import history as history_mod
+    from .atomic import write_atomic
+
+    _check_kind(kind)
+    if not isinstance(target_id, str) or ENTRY_ID_PATTERN.match(target_id) is None:
+        raise ValueError(f"target id 不合法：{target_id!r}")
+    sources = [sid for sid in dict.fromkeys(source_ids or []) if isinstance(sid, str) and sid and sid != target_id]
+    if not sources:
+        raise ValueError("至少需要一個與保留目標不同的來源 id")
+    for sid in sources:
+        if ENTRY_ID_PATTERN.match(sid) is None:
+            raise ValueError(f"source id 不合法：{sid!r}")
+
+    if assert_writable is not None:
+        assert_writable(work / REGISTRY_FILE)
+
+    doc = load_registry(work)
+    table = doc.get(kind)
+    if not isinstance(table, dict):
+        table = {}
+        doc[kind] = table
+
+    cur = table.get(target_id)
+    merged_entry: dict[str, str] = (
+        {k: v for k, v in cur.items() if isinstance(v, str)}
+        if isinstance(cur, dict) and cur
+        else {"label": "", "note": ""}
+    )
+    notes_seen = [merged_entry["note"]] if merged_entry.get("note") else []
+    for sid in sources:
+        src = table.get(sid)
+        if isinstance(src, dict):
+            if not merged_entry.get("label") and isinstance(src.get("label"), str) and src["label"].strip():
+                merged_entry["label"] = src["label"].strip()
+            s_note = str(src.get("note") or "").strip()
+            if s_note and s_note not in notes_seen:
+                notes_seen.append(s_note)
+            if not merged_entry.get("prompt") and isinstance(src.get("prompt"), str) and src["prompt"].strip():
+                merged_entry["prompt"] = src["prompt"].strip()
+            table.pop(sid, None)
+    merged_entry["note"] = " / ".join(notes_seen)
+    table[target_id] = merged_entry
+    save_registry(work, doc)
+
+    # 合併 art/style.json 的地點外觀
+    if kind == "locations":
+        art_style_path = work / "art" / "style.json"
+        if art_style_path.is_file():
+            art_style = _load_json(art_style_path)
+            if isinstance(art_style, dict) and isinstance(art_style.get("locations"), dict):
+                locs = art_style["locations"]
+                t_loc = dict(locs.get(target_id) or {}) if isinstance(locs.get(target_id), dict) else {}
+                style_changed = False
+                for sid in sources:
+                    s_loc = locs.pop(sid, None)
+                    if isinstance(s_loc, dict):
+                        style_changed = True
+                        for key in ("tags", "description", "notes"):
+                            if not t_loc.get(key) and s_loc.get(key):
+                                t_loc[key] = s_loc[key]
+                if style_changed:
+                    if t_loc:
+                        locs[target_id] = t_loc
+                    if assert_writable is not None:
+                        assert_writable(art_style_path)
+                    write_atomic(art_style_path, _dump(art_style), encoding=UTF8)
+
+    # 改寫 scenes/ 與 gold/ 裡引用到來源 ID 的場景
+    scene_field = "location_id" if kind == "locations" else "bgm"
+    source_set = set(sources)
+    scenes_updated = 0
+    for folder in ("scenes", "gold"):
+        sdir = work / folder
+        if not sdir.is_dir():
+            continue
+        for spath in sorted(sdir.glob("ch[0-9][0-9][0-9].json")):
+            sdoc = _load_json(spath)
+            if not isinstance(sdoc, dict) or not isinstance(sdoc.get("scenes"), list):
+                continue
+            changed = False
+            for sc in sdoc["scenes"]:
+                if isinstance(sc, dict) and sc.get(scene_field) in source_set:
+                    sc[scene_field] = target_id
+                    changed = True
+            if changed:
+                if assert_writable is not None:
+                    assert_writable(spath)
+                try:
+                    history_mod._write_backup(spath, spath.read_text(encoding=UTF8), None)
+                    history_mod.prune_history(spath, history_mod.DEFAULT_MAX_HISTORY)
+                except OSError:
+                    pass
+                write_atomic(spath, _dump(sdoc), encoding=UTF8)
+                scenes_updated += 1
+
+    return {"target": target_id, "merged": sources, "scenes_updated": scenes_updated, "entry": merged_entry}
+
+
 # -------------------------------------------------------------------- 合併給網頁
+
+
+def location_title_hints(work: Path) -> dict[str, str]:
+    """從 ``scenes/`` 與 ``gold/`` 蒐集每個地點 ID 曾出現過的場景標題，當空白名稱的提示。"""
+    hints: dict[str, list[str]] = {}
+    for folder in ("scenes", "gold"):
+        sdir = work / folder
+        if not sdir.is_dir():
+            continue
+        for spath in sorted(sdir.glob("ch[0-9][0-9][0-9].json")):
+            sdoc = _load_json(spath)
+            if not isinstance(sdoc, dict) or not isinstance(sdoc.get("scenes"), list):
+                continue
+            for sc in sdoc["scenes"]:
+                if not isinstance(sc, dict):
+                    continue
+                loc = sc.get("location_id")
+                title = str(sc.get("title") or "").strip()
+                if isinstance(loc, str) and loc and title:
+                    bucket = hints.setdefault(loc, [])
+                    if title not in bucket and len(bucket) < 2:
+                        bucket.append(title)
+    return {k: "例：" + "、".join(v) for k, v in hints.items()}
 
 
 def _style_locations(work: Path) -> dict[str, str]:

@@ -7,9 +7,11 @@ FE.PAGES.settings = async (ctx) => {
   const ex = st.executors, paths = st.paths;
   const THINK = { off: "關閉（最快最省，預設）", low: "低", medium: "中", high: "高", max: "最高" };
   const comfy = st.comfyui || {};
+  const tc = st.tagcomplete || {};
   const form = { default: ex.default, providers: {}, remove: [], paths: { works_dir: paths.works_dir_is_default ? "" : paths.works_dir, book_library: paths.book_library },
     comfyui: { base_url: comfy.base_url || "", default_profile: comfy.default_profile || "",
                profiles: JSON.parse(JSON.stringify(comfy.profiles || {})) },
+    tagcomplete: { tag_csv: tc.tag_csv || "", tag_zh_csv: tc.tag_zh_csv || "", forge_dir: tc.forge_dir || "" },
     server: { port: st.server.port } };
   const edit = (id, key, value) => { (form.providers[id] ||= {})[key] = value; };
   const field = (label, control, hint) => h("div", { style: "margin:8px 0" }, h("div", { class: "small muted" }, label), control, hint ? h("div", { class: "small muted" }, hint) : "");
@@ -39,16 +41,23 @@ FE.PAGES.settings = async (ctx) => {
         p.key.needed ? badge(p.key.found ? "金鑰已設定" : "沒有金鑰", p.key.found ? "ok" : "bad") : badge("不需金鑰")),
       h("div", { class: "prov-body" },
         p.builtin ? "" : field("顯示名稱", h("input", { value: p.name, style: "width:240px", oninput: (e) => edit(p.id, "name", e.target.value.trim()) })),
-        field("伺服器位址（OpenAI 相容，結尾通常是 /v1）", h("input", { value: p.base_url, style: "width:min(420px,100%)", oninput: (e) => edit(p.id, "base_url", e.target.value.trim()) }),
+        field(p.type === "gemini" ? "API 端點（Google Gemini v1beta）" : "伺服器位址（OpenAI 相容，結尾通常是 /v1）",
+          h("input", { value: p.base_url, style: "width:min(420px,100%)", oninput: (e) => edit(p.id, "base_url", e.target.value.trim()) }),
           p.id === "llamacpp" ? "先啟動 llama-server（例如 llama-server -m 模型.gguf -c 32768 --port 8080）。" : ""),
         field("模型", h("div", { class: "row" }, modelInput, h("datalist", { id: "models-" + p.id }, known.map((m) => h("option", { value: m }))),
-          known.map((m) => h("button", { class: "sm", onclick: () => { modelInput.value = m; edit(p.id, "model", m); } }, m === "deepseek-flash" ? "flash（便宜、快，預設）" : m === "deepseek-v4-pro" ? "pro（較強、約 4.5 倍價錢）" : m)))),
+          known.map((m) => h("button", { class: "sm", onclick: () => { modelInput.value = m; edit(p.id, "model", m); } },
+            m === "deepseek-flash" ? "flash（便宜、快，預設）"
+              : m === "deepseek-v4-pro" ? "pro（較強、約 4.5 倍價錢）"
+              : m === "gemini-3.8-flash" ? "3.8 Flash（預設）"
+              : m === "gemini-4-neon" ? "4 Neon"
+              : m)))),
         h("div", { class: "prov-grid" },
           field("上下文長度（tokens）", num("context_tokens", 1000, 10000000, 1024), "要和伺服器的 -c 一致；送出內容超過會先擋下，不用等伺服器報錯。"),
           field("單次輸出上限（tokens）", num("max_output", 16, 1000000, 1024)),
           field("溫度", num("temperature", 0, 2, 0.1, 80), "標註是結構化工作，低一點比較穩。"),
           field("思考模式", select(Object.entries(THINK).filter(([k]) => ex.efforts.includes(k)), p.reasoning.structured, (v) => edit(p.id, "reasoning", { structured: v })), "開了會慢很多、也貴很多；標註通常不需要。"),
-          field("要求 JSON 輸出", h("input", { type: "checkbox", checked: p.json_mode, onchange: (e) => edit(p.id, "json_mode", e.target.checked) }), "不支援的伺服器請關掉。")),
+          field("要求 JSON 輸出", h("input", { type: "checkbox", checked: p.json_mode, onchange: (e) => edit(p.id, "json_mode", e.target.checked) }), "不支援的伺服器請關掉。"),
+          p.type === "gemini" ? field("放寬安全過濾（BLOCK_NONE）", h("input", { type: "checkbox", checked: p.safety_relax !== false, onchange: (e) => edit(p.id, "safety_relax", e.target.checked) }), "減少小說創作情節遭誤擋（預設開啟）。") : ""),
         field("API 金鑰", h("div", { class: "row" }, keyInput, h("button", { onclick: saveKey }, "儲存金鑰"), p.key.found ? h("span", { class: "small muted" }, "目前：" + p.key.where) : ""), "只存在這台電腦的系統 keyring，不寫進 config.yaml，也不會顯示在畫面上。"),
         h("div", { class: "row" }, h("button", { onclick: test }, "測試連線"),
           p.builtin ? "" : h("button", { class: "ghost sm", onclick: async () => { if (await FE.confirm(`刪除自訂供應商 ${p.id}？儲存後生效。`, { danger: true, ok: "刪除" })) { form.remove.push(p.id); toast("已標記刪除，按「儲存設定」生效"); } } }, "刪除此供應商")),
@@ -143,7 +152,6 @@ FE.PAGES.settings = async (ctx) => {
               h("table", {},
                 h("thead", {}, h("tr", {}, ["預設名稱", "steps", "cfg", "sampler", "scheduler", "lora", "lora_strength", ""].map((t) => h("th", {}, t)))),
                 h("tbody", {}, Object.keys(presets).map((name) => row(name)))),
-              h("datalist", { id: "comfy-lora-list" }, ((comfyModels && comfyModels.lora) || []).map((m) => h("option", { value: m }))),
               h("datalist", { id: "comfy-sampler-list" }, ["euler", "euler_ancestral", "er_sde", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "ddim", "uni_pc"]
                 .map((m) => h("option", { value: m }))),
               h("datalist", { id: "comfy-scheduler-list" }, ["simple", "normal", "beta", "karras", "sgm_uniform", "exponential"]
@@ -155,20 +163,80 @@ FE.PAGES.settings = async (ctx) => {
           while (presets[name]) name = "preset" + (i++);
           presets[name] = { steps: 20, cfg: 7 };
           drawComfy();
-        } }, "新增預設列"), h("span", { class: "small muted" }, "欄位：steps、cfg、sampler、scheduler、lora、lora_strength。")));
+        } }, "新增預設列"), h("span", { class: "small muted" }, "欄位：steps、cfg、sampler、scheduler、lora（加速／蒸餾 LoRA）、lora_strength。")));
+    };
+    const loraTable = (prof) => {
+      if (!Array.isArray(prof.loras)) prof.loras = [];
+      const list = prof.loras;
+      const knownLoras = (comfyModels && comfyModels.lora) || [];
+      const badLoras = knownLoras.length
+        ? list.map((x) => (x && x.name ? String(x.name).trim() : "")).filter((x) => x && knownLoras.indexOf(x) < 0)
+        : [];
+      const loraWarning = badLoras.length
+        ? h("div", { class: "small", style: "color:var(--bad);margin-top:4px" },
+            "⚠ 這些附加 LoRA 檔名不在 ComfyUI 的清單裡（出圖會被 ComfyUI 退回）：" + badLoras.join("、")
+            + "。請用下拉清單或先按上面的「抓模型清單」後重挑。")
+        : "";
+      const row = (item, idx) => h("tr", {},
+        h("td", { style: "text-align:center" }, h("input", {
+          type: "checkbox", checked: item.on !== false,
+          onchange: (e) => { item.on = Boolean(e.target.checked); },
+        })),
+        h("td", {}, h("input", {
+          value: item.name || "", list: "comfy-lora-list", style: "width:min(280px,100%)",
+          placeholder: "從 ComfyUI 清單選 LoRA 檔名",
+          oninput: (e) => { item.name = e.target.value.trim(); },
+        })),
+        h("td", {}, h("input", {
+          type: "number", step: "0.05", value: item.strength ?? 1.0, style: "width:80px",
+          oninput: (e) => {
+            const raw = e.target.value.trim();
+            const n = Number(raw);
+            if (raw !== "" && Number.isFinite(n)) item.strength = n;
+          },
+        })),
+        h("td", {}, h("input", {
+          value: item.trigger || "", style: "width:min(220px,100%)",
+          placeholder: "選填；逗號分隔（僅 VN 自動附加）",
+          oninput: (e) => { item.trigger = e.target.value.trim(); },
+        })),
+        h("td", {}, h("button", { class: "sm ghost", onclick: () => {
+          list.splice(idx, 1);
+          drawComfy();
+        } }, "刪除列")));
+      return h("div", { style: "margin-top:12px" },
+        h("div", { class: "small", style: "font-weight:600;margin-bottom:4px" }, "附加 LoRA（畫風／細節／角色，依序串接在 preset 的 lora 後面）"),
+        h("div", { class: "small muted", style: "margin-bottom:6px" }, "漫畫與 VN 都會套用勾選的 LoRA；「觸發詞」目前僅 VN 會自動附加到正向提示詞（漫畫端會忽略）。空白檔名存檔時會自動略過。"),
+        list.length
+          ? h("table", {},
+              h("thead", {}, h("tr", {}, ["啟用", "LoRA 檔名", "強度", "觸發詞（VN）", ""].map((t) => h("th", {}, t)))),
+              h("tbody", {}, list.map((item, idx) => row(item, idx))))
+          : h("div", { class: "small muted" }, "這一組目前沒有附加 LoRA。"),
+        loraWarning,
+        h("div", { class: "row", style: "margin-top:6px" },
+          h("button", { class: "sm", onclick: () => {
+            list.push({ name: "", strength: 1.0, on: true, trigger: "" });
+            drawComfy();
+          } }, "新增 LoRA")));
     };
     const edits = spec ? [
+      h("datalist", { id: "comfy-lora-list" }, ((comfyModels && comfyModels.lora) || []).map((m) => h("option", { value: m }))),
       field("種類（決定 workflow 與猜模型的方式）", h("select", { onchange: (e) => set("kind", e.target.value) },
         [["anima", "Anima"], ["moss", "MOSS-Image"]].map(([value, text]) => h("option", { value, selected: (spec.kind || "anima") === value }, text)))),
       field("workflow 檔", h("input", { value: spec.workflow || "", style: "width:min(420px,100%)", placeholder: "留空＝內建（anima.api.json／moss.api.json）", oninput: (e) => set("workflow", e.target.value.trim()) })),
       picker("unet", "主模型（unet）"), picker("clip", "文字編碼器（clip）"), picker("vae", "VAE"),
-      field("負向提示詞", h("textarea", { rows: 2, style: "width:min(520px,100%)", oninput: (e) => set("negative", e.target.value) }, spec.negative || "")),
+      field("負向提示詞", (() => {
+        const ta = h("textarea", { rows: 2, style: "width:min(520px,100%)", oninput: (e) => set("negative", e.target.value) }, spec.negative || "");
+        if (window.attachTagComplete) window.attachTagComplete(ta);
+        return ta;
+      })()),
       field("預設 preset", h("div", { class: "row" },
         h("select", { style: "width:220px", onchange: (e) => set("default_preset", e.target.value) },
           [["", "（不指定：照 workflow 內建；不會自動挑第一個）"]].concat(Object.keys(spec.presets || {}).map((n) => [n, n]))
             .map(([value, label]) => h("option", { value, selected: (spec.default_preset || "") === value }, label))),
         h("span", { class: "small muted" }, "presets 是這一組自己的，別組的同名 preset 互不影響。"))),
       presetTable(spec),
+      loraTable(spec),
     ] : [h("div", { class: "small muted" }, "目前沒有 profile：下面可以新增一個。")];
 
     const newName = h("input", { placeholder: "profile 名稱（小寫英文，例如 moss）", style: "width:240px" });
@@ -186,7 +254,7 @@ FE.PAGES.settings = async (ctx) => {
         h("button", { class: "sm", onclick: async () => {
           testOut.style.color = ""; testOut.textContent = "抓清單…";
           try { comfyModels = await FE.api(`/api/settings/comfyui/models?base_url=${encodeURIComponent(form.comfyui.base_url)}`);
-            const counts = ["unet", "clip", "vae"].map((k) => `${k} ${(comfyModels[k] || []).length}`).join("／");
+            const counts = ["unet", "clip", "vae", "lora"].map((k) => `${k} ${(comfyModels[k] || []).length}`).join("／");
             testOut.style.color = "var(--ok)"; testOut.textContent = "✔ 抓到 " + counts; drawComfy();
           } catch (error) { testOut.style.color = "var(--bad)"; testOut.textContent = "✖ " + error.message; }
         } }, "抓模型清單")),
@@ -197,7 +265,7 @@ FE.PAGES.settings = async (ctx) => {
           const name = newName.value.trim();
           if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return toast("名稱只能用小寫英文、數字、底線、連字號", "bad");
           if (form.comfyui.profiles[name]) return toast("已經有同名 profile", "bad");
-          form.comfyui.profiles[name] = { kind: "anima", workflow: "", models: { unet: "", clip: "", vae: "" }, negative: "" };
+          form.comfyui.profiles[name] = { kind: "anima", workflow: "", models: { unet: "", clip: "", vae: "" }, negative: "", loras: [] };
           newName.value = ""; comfyEdit = name; drawComfy();
         } }, "新增"),
         h("button", { class: "sm", onclick: () => {
@@ -222,25 +290,86 @@ FE.PAGES.settings = async (ctx) => {
 
   const save = async () => {
     try {
-      const body = { executors: { default: form.default, providers: form.providers, remove: form.remove }, paths: form.paths, comfyui: form.comfyui, server: form.server };
+      const body = { executors: { default: form.default, providers: form.providers, remove: form.remove }, paths: form.paths, comfyui: form.comfyui, tagcomplete: form.tagcomplete, server: form.server };
       const r = await FE.api("/api/settings", { method: "PUT", body });
+      if (window.clearTagCompleteCache) window.clearTagCompleteCache();
       toast(r.restart_required ? "已存檔。埠號要重新啟動工作台才會生效" : "設定已儲存"); refreshChip(); Executors.reload(); FE.route();
     } catch (error) { fail(error); }
   };
   drawComfy();
 
-  ctx.view(h("h1", {}, "設定"),
-    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "預設執行者"), h("div", { class: "row" }, defaultSelect, h("span", { class: "small muted" }, "沒特別指定時，標註與抽取用這個。右側 AI 面板可以臨時改用別的。"))),
-    h("h2", {}, "AI 執行者"), ...ex.providers.map(providerCard),
-    h("div", { class: "card" }, h("div", { class: "small muted" }, "自己的 OpenAI 相容伺服器（vLLM、LM Studio、Ollama 的 /v1 等）"), addCustom),
-    comfyCard(),
+  const TAB_KEY = "settings_tab";
+  const TABS = [
+    ["ai", "AI 執行者"],
+    ["comfy", "ComfyUI（出圖）"],
+    ["general", "一般與路徑"],
+  ];
+  let activeTab = FE.store.get(TAB_KEY, "ai");
+  if (!TABS.some(([k]) => k === activeTab)) activeTab = "ai";
+
+  const paneAi = h("div", {},
+    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "預設執行者"),
+      h("div", { class: "row" }, defaultSelect, h("span", { class: "small muted" }, "沒特別指定時，標註與抽取用這個。右側 AI 面板可以臨時改用別的。"))),
+    ...ex.providers.map(providerCard),
+    h("div", { class: "card" }, h("div", { class: "small muted" }, "自己的 OpenAI 相容伺服器（vLLM、LM Studio、Ollama 的 /v1 等）"), addCustom));
+
+  const paneComfy = h("div", {}, comfyCard());
+
+  const paneGeneral = h("div", {},
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "位置"),
-      field("作品存放位置（匯入的章節、標註、原型、之後的圖片都放這裡）", h("div", { class: "row" }, worksInput, h("button", { onclick: () => browse((p) => { worksInput.value = p; form.paths.works_dir = p; }, { dirs: true, start: paths.works_dir }) }, "瀏覽…"),
-        h("button", { onclick: () => { worksInput.value = ""; form.paths.works_dir = ""; } }, "用預設")), "目前：" + paths.works_dir + "。改位置不會搬移已有的書，要自己把舊資料夾整個複製過去。"),
-      field("書庫位置（novel-studio 的書；唯讀，只會讀取）", h("div", { class: "row" }, libInput, h("button", { onclick: () => browse((p) => { libInput.value = p; form.paths.book_library = p; }, { dirs: true, start: paths.book_library }) }, "瀏覽…")), paths.library_exists ? "" : "⚠ 找不到這個資料夾"),
+      field("作品存放位置（匯入的章節、標註、原型、之後的圖片都放這裡）", h("div", { class: "row" }, worksInput,
+        h("button", { onclick: () => browse((p) => { worksInput.value = p; form.paths.works_dir = p; }, { dirs: true, start: paths.works_dir }) }, "瀏覽…"),
+        h("button", { onclick: () => { worksInput.value = ""; form.paths.works_dir = ""; } }, "用預設")),
+        "目前：" + paths.works_dir + "。改位置不會搬移已有的書，要自己把舊資料夾整個複製過去。"),
+      field("書庫位置（novel-studio 的書；唯讀，只會讀取）", h("div", { class: "row" }, libInput,
+        h("button", { onclick: () => browse((p) => { libInput.value = p; form.paths.book_library = p; }, { dirs: true, start: paths.book_library }) }, "瀏覽…")),
+        paths.library_exists ? "" : "⚠ 找不到這個資料夾"),
       field("專案資料夾（程式與設定檔所在，不能在這裡改）", h("code", {}, paths.project_root))),
-    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "其他"),
-      field("ComfyUI 位址", h("span", { class: "small muted" }, "移到上面的「ComfyUI（出圖）」卡片：漫畫與 VN 共用同一個位址。")),
-      field("工作台埠號", h("input", { type: "number", min: 1024, max: 65535, value: form.server.port, style: "width:100px", oninput: (e) => { form.server.port = Number(e.target.value); } }), `預設 7866；目前執行在 ${st.server.running_port ?? "?"}。改了要關掉工作台再啟動。`)),
-    h("div", { class: "row" }, h("button", { class: "primary", onclick: save }, "儲存設定"), h("span", { class: "small muted" }, `存到 ${st.config_path || "（沒有設定檔）"}；會重寫整個檔案（YAML 註解不保留），舊檔備份成 config.yaml.bak。`)));
+    (() => {
+      const tcTagInput = h("input", { value: form.tagcomplete.tag_csv, style: "width:min(440px,100%)", placeholder: "例如 danbooru.csv（留空則由下方 Forge 資料夾自動偵測）", oninput: (e) => { form.tagcomplete.tag_csv = e.target.value.trim(); } });
+      const tcZhInput = h("input", { value: form.tagcomplete.tag_zh_csv, style: "width:min(440px,100%)", placeholder: "例如 danbooru-0-zh.csv（支援中文反查英文標籤）", oninput: (e) => { form.tagcomplete.tag_zh_csv = e.target.value.trim(); } });
+      const tcForgeInput = h("input", { value: form.tagcomplete.forge_dir, style: "width:min(440px,100%)", placeholder: "選填：Forge／WebUI 根資料夾（自動找 tagcomplete 擴充）", oninput: (e) => { form.tagcomplete.forge_dir = e.target.value.trim(); } });
+      const resolved = tc.resolved || {};
+      const statusText = (resolved.tag_csv || resolved.tag_zh_csv)
+        ? `✔ 已啟用：${[resolved.tag_csv ? "英文表" : "", resolved.tag_zh_csv ? "中文表" : ""].filter(Boolean).join(" ＋ ")}`
+        : "尚未偵測到標籤 CSV（填入路徑並按「儲存設定」後，各繪圖提示詞欄位即啟用自動補全）";
+      return h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "標籤補全（TagComplete）"),
+        h("div", { class: "small muted", style: "margin-bottom:8px" }, "在角色外觀、畫風、ComfyUI 提示詞欄位打英文前綴、別名、@畫師或中文時自動跳出 Danbooru 標籤補全。"),
+        field("Danbooru 標籤 CSV（tag_csv）", h("div", { class: "row" }, tcTagInput,
+          h("button", { onclick: () => browse((p) => { tcTagInput.value = p; form.tagcomplete.tag_csv = p; }, { start: form.tagcomplete.tag_csv }) }, "瀏覽…"))),
+        field("中文對照 CSV（tag_zh_csv）", h("div", { class: "row" }, tcZhInput,
+          h("button", { onclick: () => browse((p) => { tcZhInput.value = p; form.tagcomplete.tag_zh_csv = p; }, { start: form.tagcomplete.tag_zh_csv }) }, "瀏覽…"))),
+        field("Forge 資料夾（forge_dir，選填）", h("div", { class: "row" }, tcForgeInput,
+          h("button", { onclick: () => browse((p) => { tcForgeInput.value = p; form.tagcomplete.forge_dir = p; }, { dirs: true, start: form.tagcomplete.forge_dir }) }, "瀏覽…"))),
+        h("div", { class: "small", style: (resolved.tag_csv || resolved.tag_zh_csv) ? "color:var(--ok)" : "color:var(--ink-2)" }, statusText));
+    })(),
+    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "伺服器"),
+      field("工作台埠號", h("input", { type: "number", min: 1024, max: 65535, value: form.server.port, style: "width:100px", oninput: (e) => { form.server.port = Number(e.target.value); } }),
+        `預設 7866；目前執行在 ${st.server.running_port ?? "?"}。改了要關掉工作台再啟動。`)));
+
+  const panes = { ai: paneAi, comfy: paneComfy, general: paneGeneral };
+  const tabBtns = {};
+  const selectTab = (key) => {
+    activeTab = key;
+    FE.store.set(TAB_KEY, key);
+    for (const [k] of TABS) {
+      panes[k].hidden = k !== key;
+      tabBtns[k].className = tabClass(k === key);
+      tabBtns[k].setAttribute("aria-selected", k === key ? "true" : "false");
+    }
+  };
+  const tabBar = h("div", { class: "tabs", role: "tablist" }, TABS.map(([k, label]) => {
+    const btn = h("div", { class: tabClass(k === activeTab), role: "tab", onclick: () => selectTab(k) }, label);
+    tabBtns[k] = btn;
+    return btn;
+  }));
+  selectTab(activeTab);
+
+  const head = h("div", { class: "page-head-sticky" },
+    h("h1", { style: "margin:0" }, "設定"),
+    h("span", { class: "grow" }),
+    h("span", { class: "small muted" }, `存到 ${st.config_path || "（沒有設定檔）"}（自動備份 .bak）`),
+    h("button", { class: "primary", onclick: save }, "儲存設定"));
+
+  ctx.view(head, tabBar, paneAi, paneComfy, paneGeneral);
 };

@@ -207,6 +207,16 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
         url = (base_url or ctx.config.comfyui_base_url).strip()
         return art_gen.VendorBackend(url).models()
 
+    @app.get("/api/tags/suggest")
+    def tags_suggest(q: str = "", limit: int = 15, mode: str = "all"):
+        """繪圖 Prompt 即時標籤補全（Danbooru CSV ＋ 中文反查）。"""
+        from . import tagcomplete
+
+        tag_path, zh_path = tagcomplete.resolve_dict_paths(
+            ctx.config.tag_csv, ctx.config.tag_zh_csv, ctx.config.forge_dir
+        )
+        return tagcomplete.suggest_tags(q, tag_path, zh_path, limit=limit, mode=mode)
+
     # ---- 書架
     @app.get("/api/books")
     def books():
@@ -216,7 +226,7 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     async def import_library(request: Request):
         body = await request.json()
         return ctx.studio.import_library_book(body.get("dir_name", ""), body.get("book_id", ""), body.get("display_name", ""),
-                                              body.get("lang") or "zh-TW")
+                                              body.get("lang") or "", init_comic=bool(body.get("init_comic")))
 
     @app.post("/api/import/preview")
     async def import_preview(request: Request):
@@ -226,12 +236,22 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     @app.post("/api/import/commit")
     async def import_commit(request: Request):
         body = await request.json()
-        return ctx.studio.commit_import(body.get("book_id", ""), body.get("display_name", ""), _payload(body), body.get("opts") or {})
+        return ctx.studio.commit_import(body.get("book_id", ""), body.get("display_name", ""), _payload(body), body.get("opts") or {},
+                                        init_comic=bool(body.get("init_comic")))
 
     # ---- 章節、場景、角色、章綱
     @app.get("/api/books/{book_id}/chapters")
     def chapters(book_id: str):
         return {"chapters": ctx.studio.chapters(book_id), "book": ctx.studio.book_json(book_id)}
+
+    @app.get("/api/books/{book_id}/chapters/sync-library")
+    def chapters_sync_check(book_id: str):
+        return ctx.studio.check_library_chapters(book_id)
+
+    @app.post("/api/books/{book_id}/chapters/sync-library")
+    async def chapters_sync_apply(book_id: str, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        return ctx.studio.sync_library_chapters(book_id, include_modified=bool(body.get("include_modified")))
 
     @app.get("/api/books/{book_id}/chapters/{number}")
     def chapter(book_id: str, number: int):
@@ -273,9 +293,26 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.post("/api/books/{book_id}/comic")
     async def comic_create(book_id: str, request: Request):
-        body = await request.json()
-        return comic.create_project(book_id, str(body.get("project_id") or ""), str(body.get("title") or ""),
-                                    preset=body.get("preset") or None, config=ctx.config)
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        pid = str(body.get("project_id") or "").strip()
+        if not pid:
+            existing = {row["project_id"] for row in comic.list_projects(book_id, ctx.config)}
+            pid = "main"
+            idx = 2
+            while pid in existing:
+                pid = f"main_{idx}"
+                idx += 1
+        title = str(body.get("title") or "").strip()
+        if not title:
+            book = ctx.studio.book_json(book_id)
+            lang = book.get("lang", "zh-TW")
+            title = (book.get("display_name") or {}).get(lang) or book_id
+        created = comic.create_project(book_id, pid, title, preset=body.get("preset") or None, config=ctx.config)
+        try:
+            comic.bible_cards(book_id, pid, overwrite=False, config=ctx.config)
+        except Exception:  # noqa: BLE001
+            pass
+        return created
 
     @app.get("/api/books/{book_id}/comic/{project_id}")
     def comic_overview(book_id: str, project_id: str):
@@ -319,7 +356,15 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     @app.put("/api/books/{book_id}/comic/{project_id}/settings")
     async def comic_settings_save(book_id: str, project_id: str, request: Request):
         body = await request.json()
-        return comic.save_settings(book_id, project_id, body.get("lettering") or {}, ctx.config)
+        return comic.save_settings(
+            book_id,
+            project_id,
+            body.get("lettering") if "lettering" in body else None,
+            ctx.config,
+            loras=body.get("loras") if "loras" in body else None,
+            lora_mode=body.get("lora_mode") if "lora_mode" in body else None,
+            project=body.get("project") if "project" in body else None,
+        )
 
     @app.post("/api/books/{book_id}/comic/{project_id}/chapter/{number}/source")
     async def comic_source(book_id: str, project_id: str, number: int, request: Request):
@@ -515,7 +560,44 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
     # ---- 設定集（地點／BGM 註冊表）
     @app.get("/api/books/{book_id}/bible")
     def get_bible(book_id: str):
-        return bible.merged_view(ctx.studio.work(book_id))
+        work = ctx.studio.work(book_id)
+        lib = ctx.studio.library_dir(book_id)
+        data = bible.merged_view(work)
+        hints = bible.location_title_hints(work)
+        for row in data.get("locations") or []:
+            if not row.get("label") and row.get("id") in hints:
+                row["hint"] = hints[row["id"]]
+        wc = art_cards_studio.read_world_context(work, lib)
+        data["has_library"] = lib is not None
+        data["world_context"] = wc["world_context"]
+        data["world_context_fallback"] = wc["fallback"]
+        return data
+
+    @app.put("/api/books/{book_id}/bible/world-context")
+    async def put_bible_world_context(book_id: str, request: Request):
+        body = await request.json()
+        work = ctx.studio.work(book_id)
+        saved = art_cards_studio.save_world_context(
+            ctx.config.assert_writable, work, str(body.get("world_context") or "")
+        )
+        return {"world_context": saved}
+
+    @app.post("/api/books/{book_id}/bible/sync-library")
+    async def sync_bible_library(book_id: str, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        return ctx.studio.sync_library_locations(book_id, overwrite=bool(body.get("overwrite")))
+
+    @app.post("/api/books/{book_id}/bible/{kind}/merge")
+    async def merge_bible_entries(book_id: str, kind: str, request: Request):
+        body = await request.json()
+        work = ctx.studio.work(book_id)
+        return bible.merge_entries(
+            work,
+            kind,
+            str(body.get("target") or "").strip(),
+            list(body.get("sources") or []),
+            assert_writable=ctx.config.assert_writable,
+        )
 
     @app.put("/api/books/{book_id}/bible/{kind}/{entry_id}")
     async def put_bible_entry(book_id: str, kind: str, entry_id: str, request: Request):
@@ -645,7 +727,20 @@ def create_app(config: Config, llm_factory: Callable[[], LlmFn] | None = None, c
 
     @app.get("/api/books/{book_id}/art/cards")
     def cards_list(book_id: str):
-        return art_cards_studio.overview(art_work(book_id), ctx.studio.library_dir(book_id), book_lang(book_id))
+        lib = ctx.studio.library_dir(book_id)
+        data = art_cards_studio.overview(art_work(book_id), lib, book_lang(book_id))
+        data["has_library"] = lib is not None
+        return data
+
+    @app.post("/api/books/{book_id}/art/cards/sync-library")
+    async def cards_sync_library(book_id: str, request: Request):
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        report = ctx.studio.sync_library_visual_cards(book_id, overwrite=bool(body.get("overwrite")))
+        try:
+            art_gen.refresh_manifest(ctx.config, art_work(book_id), book_id, book_lang(book_id))
+        except art_gen.ArtGenError:
+            pass
+        return report
 
     @app.put("/api/books/{book_id}/art/cards/{char_id}")
     async def cards_save(book_id: str, char_id: str, request: Request):

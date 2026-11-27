@@ -12,7 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import annotate, ingest
+from . import annotate, history, ingest
+from .atomic import write_atomic
 from .config import Config
 from .errors import ConfigError, SourceError, T2vnError
 from .schema_check import PLAYER_ID, check_scene_links, validate_data
@@ -50,8 +51,7 @@ class Studio:
 
     def _write(self, path: Path, text: str) -> None:
         target = self.config.assert_writable(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        write_atomic(target, text)
 
     def work(self, book_id: str) -> Path:
         ingest.validate_book_id(book_id)
@@ -85,24 +85,49 @@ class Studio:
                 book_id = book.get("book_id", book_file.parent.name)
                 chapters = self.chapters(book_id)
                 lang = book.get("lang", "zh-TW")
+                source_dir = str((book.get("source") or {}).get("dir_name") or "")
                 books.append({
                     "book_id": book_id, "lang": lang,
                     "display_name": (book.get("display_name") or {}).get(lang, book_id),
                     "source_kind": "library" if self.library_dir(book_id) else "import",
+                    "source_dir": source_dir,
                     "chapters": len(chapters),
                     "annotated": sum(1 for c in chapters if c["scenes_state"] != "none"),
                     "reviewed": sum(1 for c in chapters if c["scenes_state"] == "reviewed"),
                 })
         return books
 
-    def library_candidates(self) -> list[dict[str, str]]:
-        """書庫裡還沒匯入的書（資料夾裡有章節資料夾的才算）。"""
-        from .source_reader import load_field_map
+    def suggest_book_id(self, hint: str = "") -> str:
+        """依書名／資料夾名產生合法且不撞名的 ``book_id``（``^[a-z][a-z0-9_]{1,30}$``）。"""
+        import hashlib
+
+        raw = str(hint or "").strip()
+        slug = re.sub(r"[^a-z0-9_]+", "_", raw.lower()).strip("_")
+        if slug and slug[0].isalpha() and len(slug) >= 2:
+            base = slug[:24].rstrip("_")
+        elif slug:
+            base = f"b_{slug}"[:24].rstrip("_")
+        else:
+            digest = hashlib.sha1((raw or "book").encode("utf-8")).hexdigest()[:6]
+            base = f"book_{digest}"
+        if len(base) < 2:
+            base = f"{base}_"
+        candidate = base
+        suffix = 2
+        while (self.works_dir / candidate).exists():
+            tail = f"_{suffix}"
+            candidate = base[: 31 - len(tail)].rstrip("_") + tail
+            suffix += 1
+        return candidate
+
+    def library_candidates(self) -> list[dict[str, Any]]:
+        """書庫裡還沒匯入的書（支援 novel-studio v3 與舊 v2 格式）。"""
+        from .source_reader import detect_layout, load_field_map, read_book_meta, source_paths_for
 
         library = self.config.book_library
         if not library.is_dir():
             return []
-        text_dir = load_field_map()["source_paths"]["chapter_text_dir"]
+        fm = load_field_map()
         taken = set()
         for book in self.list_books():
             name = (self.book_json(book["book_id"]).get("source") or {}).get("dir_name")
@@ -110,8 +135,24 @@ class Studio:
                 taken.add(name)
         found = []
         for child in sorted(library.iterdir()):
-            if child.is_dir() and (child / text_dir).is_dir() and child.name not in taken:
-                found.append({"dir_name": child.name, "chapters": sum(1 for _ in (child / text_dir).glob("*.md"))})
+            if not child.is_dir() or child.name in taken:
+                continue
+            paths = source_paths_for(child, fm)
+            text_dir = child / paths["chapter_text_dir"]
+            if not text_dir.is_dir():
+                continue
+            meta = read_book_meta(child)
+            vc_dir = child / paths.get("visual_card_dir", "bible/visual-cards")
+            title = str(meta.get("title") or "").strip()
+            found.append({
+                "dir_name": child.name,
+                "chapters": sum(1 for _ in text_dir.glob("*.md")),
+                "layout": detect_layout(child, fm),
+                "title": title,
+                "lang": str(meta.get("lang") or "").strip(),
+                "visual_cards": sum(1 for _ in vc_dir.glob("*.md")) if vc_dir.is_dir() else 0,
+                "suggested_id": self.suggest_book_id(child.name or title),
+            })
         return found
 
     # ------------------------------------------------------------ 匯入
@@ -119,22 +160,39 @@ class Studio:
     def preview_import(self, payload: dict[str, Any], opts: dict[str, Any]) -> dict[str, Any]:
         return ingest.preview(payload, opts)
 
-    def commit_import(self, book_id: str, display_name: str, payload: dict[str, Any], opts: dict[str, Any]) -> dict[str, Any]:
-        ingest.validate_book_id(book_id)
+    def _init_default_comic(self, book_id: str, title: str) -> str | None:
+        """匯入書時順手建立預設漫畫專案（``main``）並同步角色卡。失敗不阻斷匯入。"""
+        from . import comic
+
+        try:
+            comic.create_project(book_id, "main", title or book_id, config=self.config)
+            comic.bible_cards(book_id, "main", overwrite=False, config=self.config)
+            return "main"
+        except Exception:  # noqa: BLE001
+            return None
+
+    def commit_import(self, book_id: str, display_name: str, payload: dict[str, Any], opts: dict[str, Any],
+                      *, init_comic: bool = False) -> dict[str, Any]:
         lang = opts.get("lang") or "zh-TW"
         plan = ingest.plan_chapters(payload, opts)
         skip = {int(n) for n in opts.get("skip") or []}
         chosen = [c for c in plan["chapters"] if c["no"] not in skip]
         source_names = [s["name"] for s in plan["sources"]]
-        work = self.config.assert_writable(self.works_dir / book_id)
+        resolved_id = str(book_id or "").strip() or self.suggest_book_id(display_name or (source_names[0] if source_names else ""))
+        ingest.validate_book_id(resolved_id)
+        work = self.config.assert_writable(self.works_dir / resolved_id)
         source = {"kind": "import", "files": source_names}
         titles = {int(k): v for k, v in (opts.get("titles") or {}).items()}
         for c in chosen:
             c["title"] = titles.get(c["no"], c["title"])
             c["source_file"] = ", ".join(source_names)[:200]
-        index = ingest.write_book(work, book_id, display_name or book_id, lang, chosen, source)
-        self._ensure_cast_voice(book_id, work)
-        return {"book_id": book_id, "chapters": len(index["chapters"])}
+        resolved_name = (display_name or "").strip() or (Path(source_names[0]).stem if source_names else resolved_id)
+        index = ingest.write_book(work, resolved_id, resolved_name, lang, chosen, source)
+        self._ensure_cast_voice(resolved_id, work)
+        out: dict[str, Any] = {"book_id": resolved_id, "chapters": len(index["chapters"])}
+        if init_comic:
+            out["comic_project"] = self._init_default_comic(resolved_id, resolved_name)
+        return out
 
     def _ensure_cast_voice(self, book_id: str, work: Path) -> None:
         """建書時先寫一份最小 cast_voice.json（引擎預設 sherpa-onnx）。
@@ -150,32 +208,217 @@ class Studio:
                "engine": NEW_BOOK_ENGINE, "characters": {}}
         voice_lines.save_cast_voice(self.config, work, doc)
 
-    def import_library_book(self, dir_name: str, book_id: str, display_name: str, lang: str = "zh-TW") -> dict[str, Any]:
-        """把書庫（唯讀）的書正規化進 works/<book_id>/。"""
+    def import_library_book(self, dir_name: str, book_id: str = "", display_name: str = "", lang: str = "",
+                            *, init_comic: bool = False) -> dict[str, Any]:
+        """把書庫（唯讀）的書正規化進 works/<book_id>/；若書庫有視覺卡會自動同步。
+
+        ``book_id`` 留空時自動依資料夾名／書名產生；``init_comic=True`` 時同步建立預設漫畫專案 ``main``。
+        """
         from tools.normalize_book import NormalizeError, normalize_book
 
-        ingest.validate_book_id(book_id)
-        if "/" in dir_name or "\\" in dir_name or dir_name in (".", ".."):
+        from . import source_reader, visual_card_import
+
+        if "/" in dir_name or "\\" in dir_name or dir_name in (".", "..") or not dir_name:
             raise StudioError("invalid library folder name")
         book_dir = self.config.book_library / dir_name
         if not book_dir.is_dir():
             raise StudioError(f"library folder not found: {dir_name}")
-        work = self.config.assert_writable(self.works_dir / book_id)
+        meta = source_reader.read_book_meta(book_dir)
+        resolved_lang = (lang or "").strip() or str(meta.get("lang") or "zh-TW")
+        resolved_name = (display_name or "").strip() or str(meta.get("title") or "").strip() or dir_name
+        resolved_id = str(book_id or "").strip() or self.suggest_book_id(dir_name or resolved_name)
+        ingest.validate_book_id(resolved_id)
+        work = self.config.assert_writable(self.works_dir / resolved_id)
         if (work / "book.json").exists():
-            raise StudioError(f"works/{book_id} already exists")
+            raise StudioError(f"works/{resolved_id} already exists")
         try:
-            index = normalize_book(book_dir, book_id, work)
+            index = normalize_book(book_dir, resolved_id, work)
         except NormalizeError as exc:
             raise StudioError(str(exc)) from exc
-        book = {"schema_version": "0.1", "book_id": book_id, "display_name": {lang: display_name or dir_name}, "lang": lang,
+        book = {"schema_version": "0.1", "book_id": resolved_id, "display_name": {resolved_lang: resolved_name}, "lang": resolved_lang,
                 "source": {"kind": "library", "dir_name": dir_name}}
         self._write(work / "book.json", _dump(book))
         if not (work / "cast.json").exists():
-            cast = {"schema_version": "0.1", "book_id": book_id, "characters": {
-                PLAYER_ID: {"names": {lang: "主角（內心）"}, "aliases": [], "role": "player"}}}
+            cast = {"schema_version": "0.1", "book_id": resolved_id, "characters": {
+                PLAYER_ID: {"names": {resolved_lang: "主角（內心）"}, "aliases": [], "role": "player"}}}
             self._write(work / "cast.json", _dump(cast))
-        self._ensure_cast_voice(book_id, work)
-        return {"book_id": book_id, "chapters": len(index["chapters"])}
+        self._ensure_cast_voice(resolved_id, work)
+        vc_report = visual_card_import.sync_visual_cards(
+            book_dir, work, self.config.assert_writable, lang=resolved_lang, overwrite=False
+        )
+        out: dict[str, Any] = {"book_id": resolved_id, "chapters": len(index["chapters"]), "visual_cards": vc_report}
+        if init_comic:
+            out["comic_project"] = self._init_default_comic(resolved_id, resolved_name)
+        return out
+
+    def _sync_comic_bibles(self, book_id: str) -> list[str]:
+        """若這本書已有漫畫專案，自動重跑 ``bible_cards(overwrite=True)`` 同步角色卡與地點卡。"""
+        from . import comic
+
+        synced: list[str] = []
+        try:
+            projects = comic.list_projects(book_id, self.config)
+        except Exception:  # noqa: BLE001
+            return synced
+        for proj in projects:
+            if proj.get("broken"):
+                continue
+            pid = str(proj.get("project_id") or "").strip()
+            if not pid:
+                continue
+            try:
+                comic.bible_cards(book_id, pid, overwrite=True, config=self.config)
+                synced.append(pid)
+            except Exception:  # noqa: BLE001
+                continue
+        return synced
+
+    def sync_library_visual_cards(self, book_id: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """從這本書對應的唯讀書庫同步 ``bible/visual-cards/*.md``，並同步更新既有漫畫專案角色卡。"""
+        from . import visual_card_import
+
+        work = self.work(book_id)
+        book_dir = self.library_dir(book_id)
+        if book_dir is None:
+            raise StudioError("這本書沒有對應的書庫資料夾，無法同步視覺卡")
+        lang = self.book_json(book_id).get("lang", "zh-TW")
+        report = visual_card_import.sync_visual_cards(
+            book_dir, work, self.config.assert_writable, lang=lang, overwrite=overwrite
+        )
+        report["comic_projects_synced"] = self._sync_comic_bibles(book_id)
+        return report
+
+    def sync_library_locations(self, book_id: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """從這本書對應的唯讀書庫同步世界觀地點到 ``bible.json`` 與 ``art/style.json``，並同步更新既有漫畫專案地點卡。"""
+        from . import visual_card_import
+
+        work = self.work(book_id)
+        book_dir = self.library_dir(book_id)
+        if book_dir is None:
+            raise StudioError("這本書沒有對應的書庫資料夾，無法同步地點")
+        report = visual_card_import.sync_world_locations(
+            book_dir, work, self.config.assert_writable, overwrite=overwrite
+        )
+        report["comic_projects_synced"] = self._sync_comic_bibles(book_id)
+        return report
+
+    def check_library_chapters(self, book_id: str) -> dict[str, Any]:
+        """唯讀比對書庫正文與已匯入的 ``chapters/``，回傳新增與已修訂章節清單。"""
+        from tools import normalize_book as nb
+
+        work = self.work(book_id)
+        book_dir = self.library_dir(book_id)
+        if book_dir is None:
+            return {"has_library": False, "added": [], "modified": [], "unchanged": 0}
+        try:
+            rules = nb._load_field_map(nb.DEFAULT_FIELD_MAP, book_root=book_dir)
+            sources = nb._list_chapter_files(book_dir / rules.chapter_text_dir, rules, book_dir)
+        except nb.NormalizeError as exc:
+            raise StudioError(str(exc)) from exc
+
+        chapters_dir = work / nb.CHAPTERS_DIR_NAME
+        added: list[dict[str, Any]] = []
+        modified: list[dict[str, Any]] = []
+        unchanged = 0
+        for source in sources:
+            cid = f"ch{source.chapter_no:03d}"
+            existing_path = chapters_dir / f"{cid}.json"
+            text, digest = nb._read_chapter_text(source)
+            parsed = nb._parse_chapter(source, rules, book_id, text, digest)
+            if not existing_path.is_file():
+                added.append({
+                    "chapter_no": source.chapter_no,
+                    "chapter_id": cid,
+                    "title": parsed["title"],
+                    "char_count": parsed["char_count"],
+                })
+                continue
+            try:
+                old = _read_json(existing_path)
+            except StudioError:
+                old = {}
+            if old.get("sha256") != digest:
+                modified.append({
+                    "chapter_no": source.chapter_no,
+                    "chapter_id": cid,
+                    "title": parsed["title"],
+                    "char_count": parsed["char_count"],
+                    "has_scenes": self._scene_path(work, cid) is not None,
+                })
+            else:
+                unchanged += 1
+        return {"has_library": True, "added": added, "modified": modified, "unchanged": unchanged}
+
+    def sync_library_chapters(self, book_id: str, *, include_modified: bool = False) -> dict[str, Any]:
+        """從書庫增量同步新章節（選填同步原稿已修訂舊章），絕不改動既有 ``scenes/`` 與 ``gold/``。"""
+        from tools import normalize_book as nb
+
+        work = self.config.assert_writable(self.work(book_id))
+        book_dir = self.library_dir(book_id)
+        if book_dir is None:
+            raise StudioError("這本書沒有對應的書庫資料夾，無法同步章節")
+        try:
+            rules = nb._load_field_map(nb.DEFAULT_FIELD_MAP, book_root=book_dir)
+            sources = nb._list_chapter_files(book_dir / rules.chapter_text_dir, rules, book_dir)
+        except nb.NormalizeError as exc:
+            raise StudioError(str(exc)) from exc
+
+        chapters_dir = work / nb.CHAPTERS_DIR_NAME
+        chapters_dir.mkdir(parents=True, exist_ok=True)
+        index_path = chapters_dir / nb.INDEX_FILE_NAME
+        existing_index = _read_json(index_path) if index_path.is_file() else {"chapters": []}
+        by_no: dict[int, dict[str, Any]] = {
+            int(c["chapter_no"]): dict(c) for c in (existing_index.get("chapters") or []) if "chapter_no" in c
+        }
+
+        added: list[int] = []
+        updated: list[int] = []
+        skipped_modified: list[int] = []
+
+        for source in sources:
+            cid = f"ch{source.chapter_no:03d}"
+            existing_path = chapters_dir / f"{cid}.json"
+            text, digest = nb._read_chapter_text(source)
+            is_new = not existing_path.is_file()
+            if not is_new:
+                try:
+                    old = _read_json(existing_path)
+                except StudioError:
+                    old = {}
+                if old.get("sha256") == digest:
+                    continue
+                if not include_modified:
+                    skipped_modified.append(source.chapter_no)
+                    continue
+            chapter = nb._parse_chapter(source, rules, book_id, text, digest)
+            self._write(existing_path, _dump(chapter))
+            by_no[source.chapter_no] = {
+                "chapter_id": chapter["chapter_id"],
+                "chapter_no": chapter["chapter_no"],
+                "title": chapter["title"],
+                "char_count": chapter["char_count"],
+                "paragraph_count": len(chapter["paragraphs"]),
+                "file": nb.CHAPTER_FILE_FORMAT.format(chapter_id=chapter["chapter_id"]),
+            }
+            if is_new:
+                added.append(source.chapter_no)
+            else:
+                updated.append(source.chapter_no)
+
+        if added or updated:
+            new_index = {
+                "schema_version": nb.SCHEMA_VERSION,
+                "book_id": book_id,
+                "chapters": [by_no[n] for n in sorted(by_no)],
+            }
+            self._write(index_path, _dump(new_index))
+
+        return {
+            "added": added,
+            "updated": updated,
+            "skipped_modified": skipped_modified,
+            "total": len(by_no),
+        }
 
     # ------------------------------------------------------------ 章節
 
@@ -308,10 +551,12 @@ class Studio:
             self.set_status(book_id, number, status)
         return checked
 
-    def _backup(self, path: Path, history_dir: Path) -> None:
+    def _backup(self, path: Path, history_dir: Path, keep: int = history.DEFAULT_MAX_HISTORY) -> None:
         if path.is_file():
             stamp = time.strftime("%Y%m%d%H%M%S")
             self._write(history_dir / f"{path.stem}_{stamp}{path.suffix}", path.read_text(encoding="utf-8"))
+            if history_dir == path.parent / history.HISTORY_DIR_NAME:
+                history.prune_history(path, keep)
 
     def set_status(self, book_id: str, number: int, status: str) -> None:
         if status not in STATUS_VALUES:

@@ -148,3 +148,27 @@ def test_comfyui_profiles_parse_and_default_must_exist(tmp_path):
         _base_config(tmp_path, "bad-preset", profiles={"moss": {"kind": "moss", "presets": {"turbo": {"steps": 4}}, "default_preset": "final"}}, default_profile="moss")
     with pytest.raises(ConfigError, match="default_profile"):
         _base_config(tmp_path, "bad-default", profiles={"moss": {"kind": "moss"}}, default_profile="nope")
+
+
+def test_comfyui_profile_loras_parse_and_validate(tmp_path):
+    cfg = _base_config(
+        tmp_path, "loras-ok",
+        profiles={"anima": {
+            "kind": "anima",
+            "loras": [
+                {"name": "style\\watercolor.safetensors", "strength": 0.75, "on": True, "trigger": "watercolor style"},
+                {"name": "detail.safetensors", "on": False},
+            ],
+        }},
+        default_profile="anima",
+    )
+    loras = cfg.comfy_profiles["anima"]["loras"]
+    assert len(loras) == 2
+    assert loras[0] == {"name": "style\\watercolor.safetensors", "strength": 0.75, "on": True, "trigger": "watercolor style"}
+    assert loras[1] == {"name": "detail.safetensors", "strength": 1.0, "on": False, "trigger": ""}
+    with pytest.raises(ConfigError, match="沒有 name"):
+        _base_config(tmp_path, "loras-empty", profiles={"anima": {"kind": "anima", "loras": [{"name": ""}]}})
+    with pytest.raises(ConfigError, match="strength"):
+        _base_config(tmp_path, "loras-bad-str", profiles={"anima": {"kind": "anima", "loras": [{"name": "a.safetensors", "strength": "high"}]}})
+    with pytest.raises(ConfigError, match="on"):
+        _base_config(tmp_path, "loras-bad-on", profiles={"anima": {"kind": "anima", "loras": [{"name": "a.safetensors", "on": "yes"}]}})

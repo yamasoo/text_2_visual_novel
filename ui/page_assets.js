@@ -175,21 +175,71 @@ FE.PAGES["book/:id/assets"] = async (ctx) => {
         toolbar,
         cands.length ? h("div", { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(" + (asset.kind === "bg" ? "220px" : "130px") + ",1fr));gap:10px;margin-top:8px" }, cands) : "");
     }
+    const SEL_KEY = `assets_sel_${bookId}`;
+    let selectedId = FE.store.get(SEL_KEY, "") || "";
+    const leftList = h("div", { class: "md-list" });
+    const rightDetail = h("div", { class: "md-detail" });
+    const list = h("div", { class: "master-detail" }, leftList, rightDetail);
+
     function draw() {
       const shown = data.assets.filter((a) => (!kindFilter || a.kind === kindFilter) && (!statusFilter || a.status === statusFilter));
-      const blocks = [];
-      let current = null;
-      for (const asset of shown) {
-        const owner = asset.char_id || "";
-        if (owner && owner !== current) {
-          blocks.push(h("h3", { style: "margin:18px 0 6px" }, `角色：${owner}`));
-        }
-        current = owner;
-        blocks.push(card(asset));
+      if (!shown.length) {
+        leftList.replaceChildren(h("div", { class: "small muted", style: "padding:10px" }, "沒有符合的素材。"));
+        rightDetail.replaceChildren(h("div", { class: "card muted" }, "沒有符合篩選條件的素材。"));
+        return;
       }
-      list.replaceChildren(...(blocks.length ? blocks : [h("div", { class: "card muted" }, "沒有符合的素材。")]));
+      if (!shown.some((a) => a.asset_id === selectedId)) {
+        selectedId = shown[0].asset_id;
+      }
+      const items = [];
+      let currentGroup = null;
+      for (const asset of shown) {
+        const groupName = asset.kind === "bg" ? "背景" : asset.char_id ? `角色：${asset.char_id}` : (KIND[asset.kind] || asset.kind);
+        if (groupName !== currentGroup) {
+          items.push(h("div", { class: "small muted", style: "padding:6px 8px 2px;font-weight:600;border-top:1px solid var(--line);margin-top:4px" }, groupName));
+          currentGroup = groupName;
+        }
+        const [sLabel, sKind] = STATUS[asset.status] || [asset.status, ""];
+        const active = asset.asset_id === selectedId;
+        items.push(h("div", {
+          class: "md-item" + (active ? " active" : ""),
+          onclick: () => { selectedId = asset.asset_id; FE.store.set(SEL_KEY, selectedId); draw(); },
+        },
+          h("div", { class: "row", style: "gap:4px;justify-content:space-between" },
+            h("strong", { class: "small" }, Object.values(asset.names || {})[0] || asset.asset_id),
+            badge(sLabel, sKind)),
+          h("div", { class: "small muted" }, `${asset.asset_id}${(asset.candidates || []).length ? ` · ${asset.candidates.length} 張` : ""}`)));
+      }
+      leftList.replaceChildren(...items);
+
+      const idx = shown.findIndex((a) => a.asset_id === selectedId);
+      const chosen = shown[idx >= 0 ? idx : 0];
+      const goIdx = (next) => {
+        if (next < 0 || next >= shown.length) return;
+        selectedId = shown[next].asset_id;
+        FE.store.set(SEL_KEY, selectedId);
+        draw();
+      };
+      const nextNeedPick = () => {
+        for (let step = 1; step <= shown.length; step++) {
+          const cand = shown[(idx + step) % shown.length];
+          if (cand.status === "generated" || (cand.status === "planned" && (cand.candidates || []).length > 0)) {
+            selectedId = cand.asset_id;
+            FE.store.set(SEL_KEY, selectedId);
+            draw();
+            return;
+          }
+        }
+        toast("目前篩選裡沒有「待挑圖」的項目", "ok");
+      };
+      const navBar = h("div", { class: "card row", style: "padding:8px 12px;margin-bottom:10px;align-items:center" },
+        h("button", { class: "sm", disabled: idx <= 0, onclick: () => goIdx(idx - 1) }, "← 上一項"),
+        h("button", { class: "sm", disabled: idx >= shown.length - 1, onclick: () => goIdx(idx + 1) }, "下一項 →"),
+        h("button", { class: "sm primary", onclick: nextNeedPick }, "下一個待挑 →"),
+        h("span", { class: "grow" }),
+        h("span", { class: "small muted" }, `第 ${idx + 1} / ${shown.length} 項`));
+      rightDetail.replaceChildren(navBar, card(chosen));
     }
-    const list = h("div");
     if (!data.ready) {
       wrap.append(h("div", { class: "card" }, h("p", {}, "還沒有素材清單。先標註好章節，再按下面的按鈕，系統會掃描場景列出需要的背景與立繪。"),
         h("button", { onclick: async () => { try { await api(`${base}/refresh`, { method: "POST", body: {} }); show(); } catch (e) { fail(e); } } }, "掃描場景建立清單")));
@@ -199,7 +249,15 @@ FE.PAGES["book/:id/assets"] = async (ctx) => {
     const processedCount = data.assets.filter((a) => a.status === "processed").length;
     const finalCount = data.assets.filter((a) => a.status === "final").length;
     const counts = Object.entries(data.counts).map(([k, v]) => badge(`${(STATUS[k] || [k])[0]} ${v}`, (STATUS[k] || [])[1]));
+    const onlyCover = data.assets.length > 0 && data.assets.every((a) => a.kind === "cover");
+    const noScenesHint = onlyCover
+      ? h("div", { class: "card small", style: "border-left:3px solid var(--warn)" },
+          "目前素材清單只有封面（尚無背景或立繪），因為這本書還沒執行視覺小說（VN）的「AI 標註」。請先到 ",
+          h("a", { href: `#/book/${encodeURIComponent(bookId)}` }, "視覺小說 → 章節與校對"),
+          " 執行 AI 標註，再回來按「重新掃描場景」。")
+      : "";
     wrap.append(
+      noScenesHint,
       h("div", { class: "card" },
         h("div", { class: "row" }, h("strong", {}, `圖片素材 ${data.assets.length} 項`), ...counts, h("span", { class: "grow" }),
           h("button", { class: "ghost sm", onclick: async () => { try { await api(`${base}/refresh`, { method: "POST", body: {} }); toast("已重新掃描"); show(); } catch (e) { fail(e); } } }, "重新掃描場景"),
@@ -315,6 +373,7 @@ FE.PAGES["book/:id/assets"] = async (ctx) => {
     const profiles = Object.keys(((settings.comfyui || {}).profiles) || {});
     const field = (key, label, hint, big) => {
       const el = big ? h("textarea", { rows: 2 }, s[key] || "") : h("input", { value: s[key] ?? "", style: "width:100%" });
+      if (big && window.attachTagComplete) window.attachTagComplete(el);
       return { key, el, row: h("div", { style: "margin-bottom:10px" }, h("div", {}, h("strong", {}, label), h("span", { class: "muted small" }, "　" + hint)), el) };
     };
     const profileSelect = h("select", { id: "art_comfy_profile", style: "width:100%" },

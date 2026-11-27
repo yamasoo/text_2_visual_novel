@@ -255,10 +255,28 @@ def resolve_profile(backend: ComfyBackend, art: dict[str, Any], config: Any = No
         preset = dict((spec.get("presets") or {}).get(preset_name) or {}) if preset_name else {}
         profile["preset_name"] = preset_name
         profile["preset"] = preset
-        loras = list(settings.get("loras") or [])
+        # 串接順序與漫畫（t2c）一致：preset.lora（加速 LoRA）→ profile.loras → 本書額外 settings.loras
+        loras: list[dict[str, Any]] = []
         if preset.get("lora"):
-            loras = [{"name": str(preset["lora"]), "on": True,
-                      "strength": float(preset.get("lora_strength") or 1.0), "trigger": ""}]
+            raw_str = preset.get("lora_strength")
+            loras.append({
+                "name": str(preset["lora"]),
+                "on": True,
+                "strength": float(raw_str if raw_str is not None else 1.0),
+                "trigger": "",
+            })
+        for item in (spec.get("loras") or []):
+            if isinstance(item, dict) and str(item.get("name") or "").strip():
+                raw_str = item.get("strength")
+                loras.append({
+                    "name": str(item["name"]).strip(),
+                    "on": bool(item.get("on", True)),
+                    "strength": float(raw_str if raw_str is not None else 1.0),
+                    "trigger": str(item.get("trigger") or "").strip(),
+                })
+        for item in (settings.get("loras") or []):
+            if isinstance(item, dict) and str(item.get("name") or "").strip():
+                loras.append(dict(item))
         profile["loras"] = loras
     else:
         kind = str(settings.get("kind") or "anima").strip().lower()

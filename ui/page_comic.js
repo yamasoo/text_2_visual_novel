@@ -35,8 +35,8 @@ function bibleSummary(bible) {
 const COMIC_T2C_SECTIONS = [
   ["head", "頭：髮型髮色、眼型眼色、部位特徵；性別字與年齡一定要在這裡"],
   ["body", "身體：只放體型（slim build、muscular arms）"],
-  ["upper", "上著"],
-  ["lower", "下著"],
+  ["upper", "上半身特徵（非服裝，如傷疤／刺青；無則留空）"],
+  ["lower", "下半身特徵（非服裝；無則留空）"],
   ["accessory", "永久配件：眼鏡、髮夾、疤、痣（會隨服裝換的留在服裝）"],
 ];
 const COMIC_T2C_OUTFIT_PARTS = [
@@ -73,6 +73,7 @@ function comicT2cEditor(row, opts) {
     const draft = data.draft || {};
     const makeInput = (table, key, label) => {
       const input = h("textarea", { rows: 2, style: "width:100%", placeholder: COMIC_T2C_HINT, value: comicT2cText(table[key]) });
+      if (window.attachTagComplete) window.attachTagComplete(input, { sep: "\n" });
       return { key, input, node: h("div", { style: "margin-top:6px" }, h("div", { class: "small" }, label), input) };
     };
     const sectionInputs = COMIC_T2C_SECTIONS.map(([key, label]) => makeInput(cardSections, key, label));
@@ -174,7 +175,12 @@ function bibleCard(bible, opts = {}) {
     const errors = row.errors || [];
     const warnings = row.warnings || [];
     const issues = errors.length + warnings.length;
-    const statusCell = h("td", {}, h("span", { class: "small muted" }, issues ? "有 " + issues + " 條" : "沒有問題"));
+    const editLink = opts.bookId
+      ? (kind === "角色"
+          ? h("a", { class: "small", style: "margin-left:8px", href: `#/book/${encodeURIComponent(opts.bookId)}/appearance?char=${encodeURIComponent(row.id)}` }, "去角色與外觀 →")
+          : h("a", { class: "small", style: "margin-left:8px", href: `#/book/${encodeURIComponent(opts.bookId)}/bible` }, "去地點與設定集 →"))
+      : "";
+    const statusCell = h("td", {}, h("span", { class: "small muted" }, issues ? "有 " + issues + " 條" : "沒有問題"), editLink);
     // 佔位卡沒有外型卡，t2c 人工值無處可寫：不掛編輯器，只留一行說明。
     if (kind === "角色" && row.placeholder) {
       statusCell.append(h("div", { class: "small muted" }, "佔位卡沒有外型卡，人工值無處可寫"));
@@ -200,9 +206,11 @@ function bibleCard(bible, opts = {}) {
         warnings.map((item) => h("div", { class: "small" }, "! " + item.where + "：" + item.message))))));
     return out;
   };
-  return h("div", { class: "card" },
-    h("h3", {}, "角色卡與地點卡（bible）"),
-    h("div", { class: "small muted" }, "逐卡的 check_card 結果。佔位卡是還沒畫的角色，不列入驗收；草稿卡還沒進定案目錄。"),
+  const hasAnyErr = rows.some(({ row }) => (row.errors || []).length > 0);
+  return h("details", { class: "card" },
+    h("summary", { style: "cursor:pointer;font-weight:600" },
+      (hasAnyErr ? "⚠ " : "") + "本專案角色／地點體檢快照（bible）：" + bibleSummary(bible)),
+    h("div", { class: "small muted", style: "margin:8px 0" }, "這裡是共用資源衍生給漫畫引擎的唯讀檢查狀態；要修改外觀與設定建議點右側連結回「共用資源」。"),
     h("table", {},
       h("thead", {}, h("tr", {}, ["卡", "種類", "狀態", "檢查"].map((label) => h("th", {}, label)))),
       h("tbody", {}, rows.flatMap(cell))));
@@ -221,13 +229,20 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
   const base = `/api/books/${bookId}/comic`;
   const body = h("div");
   const tabs = h("div", { class: "tabs" });
-  let tab = rest[0] || FE.store.get(TAB_KEY, "project") || "project";
+  let tab = (ctx.query && ctx.query.tab) || rest[0] || FE.store.get(TAB_KEY, "project") || "project";
   if (!["project", "chapter", "storyboard", "letters", "render", "pages"].includes(tab)) tab = "project";
+  FE.store.set(TAB_KEY, tab);
   const PROJECT_KEY = `${TAB_KEY}_project_${bookId}`;   // 每本書分開記：A 書的專案 id 不該帶到 B 書
   let projectId = rest[1] || FE.store.get(PROJECT_KEY, "") || "";
   let chapter = Number(FE.store.get(`${TAB_KEY}_chapter`, 1)) || 1;
   let lastWarn = { chapter: 0, warnings: [] };   // 組版的 warnings 要撐過 show() 重畫
   let renderCandidates = "";   // 「候選張數」輸入框留空＝專案設定；值要撐過 show() 重畫
+  let renderPage = null;       // 出圖頁目前看的頁碼（null＝自動挑第一頁未選滿、"all"＝整章）
+  let renderFilter = "all";    // 出圖頁篩選：all | unpicked | empty
+  let renderPageMore = 1;      // 全頁各多出幾張圖
+  let boardPage = null;        // 分鏡頁目前看的頁碼（null＝第 1 頁、"all"＝整章）
+  let projSubTab = FE.store.get("comic_proj_subtab", "overview") || "overview";   // 專案頁子分頁：overview | style | lettering
+  let projComfyLoras = null;   // 專案頁按「抓 LoRA 清單」後快取的 ComfyUI LoRA 名單
   // 嵌字分頁的狀態：panels 是 letters 檔的內容（含沒改的 faces／sfx），拖曳就地改這一份。
   let lettersState = { chapter: 0, page: 1, panels: {}, plan: null, dirty: false };
 
@@ -245,7 +260,11 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
   function drawTabs() {
     const items = [["project", "專案"], ["chapter", "章節"], ["storyboard", "分鏡"], ["render", "出圖"], ["letters", "嵌字"], ["pages", "頁面與輸出"]];
     tabs.replaceChildren(...items.map(([key, label]) =>
-      h("div", { class: tabClass(key === tab), onclick: () => { tab = key; FE.store.set(TAB_KEY, key); drawTabs(); show(); } }, label)));
+      h("div", { class: tabClass(key === tab), onclick: () => {
+        tab = key;
+        FE.store.set(TAB_KEY, key);
+        FE.go(`#/book/${encodeURIComponent(bookId)}/comic?tab=${key}`);
+      } }, label)));
   }
 
   async function show() {
@@ -289,71 +308,293 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
     if (projectId && !known.includes(projectId)) forgetProject();   // 別的書記住的、或被刪掉的：清掉再走，不要留著害整頁掛掉
     if (!projectId && projects.length) useProject(projects[0].project_id);
     const wrap = h("div");
-    const create = h("div", { class: "card" },
-      h("h3", {}, "建立漫畫專案"),
-      h("div", { class: "row wrap" },
-        h("input", { placeholder: "project_id（小寫英文、數字、底線）", id: "comic_new_id" }),
-        h("input", { placeholder: "作品名", id: "comic_new_title" }),
+    if (!projects.length) {
+      wrap.append(h("div", { class: "card" },
+        h("h3", { style: "margin-top:0" }, "這本書還沒有漫畫專案"),
+        h("div", { class: "small muted", style: "margin-bottom:10px" }, "按一次就會用本書書名建立預設漫畫專案（main），並自動帶入既有角色外型卡。"),
         h("button", { class: "primary", onclick: async () => {
-          const id = document.getElementById("comic_new_id").value.trim();
-          const title = document.getElementById("comic_new_title").value.trim();
           try {
-            await api(base, { body: { project_id: id, title: title || id } });
-            useProject(id);
-            toast("已建立專案", "ok");
+            const r = await api(base, { body: {} });
+            useProject(r.project_id);
+            toast("已啟用漫畫專案（已同步角色卡）", "ok");
             show();
           } catch (error) { failIt(error); }
-        } }, "建立")));
-    wrap.append(create, h("div", { class: "card" }, h("h3", {}, "這本書的漫畫專案"), projectPicker(projects)));
-    if (projectId) {
-      let info = null;
-      try { info = await api(`${base}/${projectId}`, { signal: ctx.signal }); } catch (error) { info = null; }
-      if (!info) {
-        forgetProject();
-        wrap.append(h("div", { class: "card muted" }, `找不到漫畫專案「${projectId}」；上面可以新建一個，或從下面的清單挑。`));
-        return wrap;
-      }
-      const bible = await api(`${base}/${projectId}/bible`, { signal: ctx.signal }).catch(() => null);
-      const rows = (info.chapters || []).map((row) => ({
-        chapter: row.chapter || 0,
-        source: row.source_chars ? `${row.source_chars} 字` : "沒有",
-        plan: row.plan_pages || "沒有",
-        script: row.script_pages || "沒有",
-        storyboard: row.storyboard_pages || "沒有",
-        pages: row.pages_out || 0,
-        rendered: row.rendered || 0,
-      }));
-      wrap.append(h("div", { class: "card" },
-        h("h3", {}, info.title || projectId),
-        h("div", { class: "muted small" }, `${info.root || ""}`),
-        h("div", { class: "small" }, bibleSummary(bible)),
-        rows.length ? h("table", {},
-          h("thead", {}, h("tr", {}, ["章", "原著", "規劃", "劇本", "分鏡", "出圖", "頁面"].map((t) => h("th", {}, t)))),
-          h("tbody", {}, rows.map((row) => h("tr", {}, h("td", {}, row.chapter), h("td", {}, row.source),
-            h("td", {}, row.plan), h("td", {}, row.script), h("td", {}, row.storyboard),
-            h("td", {}, row.rendered), h("td", {}, row.pages))))) : h("div", { class: "muted" }, "還沒有章節的檔案")));
-      wrap.append(bibleCard(bible, { bookId, base, projectId, refresh: show }));
-      const settings = await api(`${base}/${projectId}/settings`, { signal: ctx.signal });
-      const lettering = settings.lettering || {};
-      const fontRow = (key, label) => h("div", { class: "row wrap" },
-        h("span", { class: "small", style: "width:96px" }, label),
-        h("input", { id: `comic_font_${key}`, value: lettering[key] || "", style: "min-width:460px",
-          placeholder: "留空＝自動找（Noto CJK／思源／正黑體）" }));
-      wrap.append(h("div", { class: "card" }, h("h3", {}, "漫畫設定（嵌字）"),
-        h("div", { class: "small muted" }, "字型填完整路徑（TTC 可用「檔名#索引」）；字型檔不進 git，只記路徑。可變字型（例如 NotoSansTC-VF.ttf）的字重由程式依角色套上。"),
-        h("div", { class: "small" }, "可隨成品發佈：Noto Sans TC、Noto Serif TC（SIL OFL 1.1）。不可發佈：微軟正黑體 msjh／msjhbd、細明體 mingliu（Windows 內建，只供自己看）。"),
+        } }, "一鍵啟用漫畫線")));
+      wrap.append(h("details", { class: "card" },
+        h("summary", { style: "cursor:pointer;font-weight:600" }, "進階：自訂專案 ID 與名稱"),
+        h("div", { class: "row wrap", style: "margin-top:10px" },
+          h("input", { placeholder: "作品名（留空用本書書名）", id: "comic_new_title" }),
+          h("input", { placeholder: "project_id（留空自動編號）", id: "comic_new_id" }),
+          h("button", { class: "primary", onclick: async () => {
+            const id = document.getElementById("comic_new_id").value.trim();
+            const title = document.getElementById("comic_new_title").value.trim();
+            try {
+              const r = await api(base, { body: { project_id: id, title } });
+              useProject(r.project_id);
+              toast("已建立專案", "ok");
+              show();
+            } catch (error) { failIt(error); }
+          } }, "建立"))));
+      return wrap;
+    }
+
+    // 精簡頂部列：專案切換＋摺疊新建專案（不再各自佔一張大卡片）
+    wrap.append(h("div", { class: "card", style: "padding:12px 16px" },
+      h("div", { class: "row wrap", style: "align-items:center;gap:8px" },
+        h("strong", { class: "small" }, "專案"),
+        projectPicker(projects)),
+      h("details", { style: "margin-top:8px" },
+        h("summary", { class: "small muted", style: "cursor:pointer" }, "＋ 新建其他漫畫專案（多版本／不同畫風）"),
+        h("div", { class: "row wrap", style: "margin-top:8px" },
+          h("input", { placeholder: "作品名（留空用本書書名）", id: "comic_new_title" }),
+          h("input", { placeholder: "project_id（留空自動編號）", id: "comic_new_id" }),
+          h("button", { class: "sm primary", onclick: async () => {
+            const id = document.getElementById("comic_new_id").value.trim();
+            const title = document.getElementById("comic_new_title").value.trim();
+            try {
+              const r = await api(base, { body: { project_id: id, title } });
+              useProject(r.project_id);
+              toast("已建立專案", "ok");
+              show();
+            } catch (error) { failIt(error); }
+          } }, "建立")))));
+
+    if (!projectId) return wrap;
+    let info = null;
+    try { info = await api(`${base}/${projectId}`, { signal: ctx.signal }); } catch (error) { info = null; }
+    if (!info) {
+      forgetProject();
+      wrap.append(h("div", { class: "card muted" }, `找不到漫畫專案「${projectId}」；上面可以新建一個，或從清單重挑。`));
+      return wrap;
+    }
+
+    const [bible, settings] = await Promise.all([
+      api(`${base}/${projectId}/bible`, { signal: ctx.signal }).catch(() => null),
+      api(`${base}/${projectId}/settings`, { signal: ctx.signal }),
+    ]);
+
+    const SUBTABS = [
+      ["overview", "總覽與章節"],
+      ["style", "畫風與 LoRA"],
+      ["lettering", "嵌字與字型"],
+    ];
+    if (!SUBTABS.some(([k]) => k === projSubTab)) projSubTab = "overview";
+
+    // 子分頁 1：總覽與章節（章節表限高固定表頭＋bible 預設收合）
+    const rows = (info.chapters || []).map((row) => ({
+      chapter: row.chapter || 0,
+      source: row.source_chars ? `${row.source_chars} 字` : "沒有",
+      plan: row.plan_pages || "沒有",
+      script: row.script_pages || "沒有",
+      storyboard: row.storyboard_pages || "沒有",
+      pages: row.pages_out || 0,
+      rendered: row.rendered || 0,
+    }));
+    const overviewPane = h("div", {},
+      h("div", { class: "card" },
+        h("div", { class: "row wrap", style: "align-items:baseline;gap:10px" },
+          h("h3", { style: "margin:0" }, info.title || projectId),
+          h("span", { class: "muted small" }, info.root || "")),
+        h("div", { class: "small", style: "margin:6px 0 10px" }, bibleSummary(bible)),
+        rows.length
+          ? h("div", { class: "scroll-table", style: "max-height:360px" },
+              h("table", {},
+                h("thead", {}, h("tr", {}, ["章", "原著", "規劃", "劇本", "分鏡", "出圖", "頁面"].map((t) => h("th", {}, t)))),
+                h("tbody", {}, rows.map((row) => h("tr", {}, h("td", {}, row.chapter), h("td", {}, row.source),
+                  h("td", {}, row.plan), h("td", {}, row.script), h("td", {}, row.storyboard),
+                  h("td", {}, row.rendered), h("td", {}, row.pages))))))
+          : h("div", { class: "muted" }, "還沒有章節的檔案")),
+      bibleCard(bible, { bookId, base, projectId, refresh: show }));
+
+    // 子分頁 2：本專案專屬畫風與 LoRA
+    const projState = {
+      comfy_profile: (settings.project && settings.project.comfy_profile) || "",
+      style_preset: (settings.project && settings.project.style_preset) || "mono",
+      style: (settings.project && settings.project.style) || "",
+      meta: ((settings.project && settings.project.meta) || []).join(", "),
+      look: (settings.project && settings.project.look) || "",
+      sfx_mode: (settings.project && settings.project.sfx_mode) || "overlay",
+      lora_mode: settings.lora_mode || "append",
+      loras: (settings.loras || []).map((x) => ({ name: x.name || "", strength: x.strength ?? 1.0, on: x.on !== false })),
+    };
+    const stylePresets = settings.style_presets || {};
+    const comfyProfiles = settings.comfy_profiles || [];
+    const defaultProfLabel = settings.comfy_default_profile ? `跟隨設定頁預設（${settings.comfy_default_profile}）` : "跟隨設定頁預設";
+    const presetHint = h("div", { class: "small muted", style: "margin-top:4px" });
+    const updatePresetHint = () => {
+      const infoP = stylePresets[projState.style_preset];
+      presetHint.textContent = infoP ? `預設風格：${infoP.style}` : "";
+    };
+    updatePresetHint();
+
+    const loraListHost = h("div");
+    const loraFetchStatus = h("span", { class: "small muted" });
+    const drawProjLoras = () => {
+      const known = projComfyLoras || [];
+      const bad = known.length
+        ? projState.loras.map((x) => (x.name || "").trim()).filter((x) => x && known.indexOf(x) < 0)
+        : [];
+      const warn = bad.length
+        ? h("div", { class: "small", style: "color:var(--bad);margin-top:4px" },
+            "⚠ 不在 ComfyUI 清單裡的 LoRA：" + bad.join("、"))
+        : "";
+      loraListHost.replaceChildren(
+        h("datalist", { id: "comic-proj-lora-list" }, known.map((m) => h("option", { value: m }))),
+        projState.loras.length
+          ? h("table", {},
+              h("thead", {}, h("tr", {}, ["啟用", "LoRA 檔名", "強度", ""].map((t) => h("th", {}, t)))),
+              h("tbody", {}, projState.loras.map((item, idx) => h("tr", {},
+                h("td", { style: "text-align:center" }, h("input", {
+                  type: "checkbox", checked: item.on !== false,
+                  onchange: (e) => { item.on = Boolean(e.target.checked); },
+                })),
+                h("td", {}, h("input", {
+                  value: item.name || "", list: "comic-proj-lora-list", style: "width:min(320px,100%)",
+                  placeholder: "從 ComfyUI 清單選 LoRA 檔名",
+                  oninput: (e) => { item.name = e.target.value.trim(); },
+                })),
+                h("td", {}, h("input", {
+                  type: "number", step: "0.05", value: item.strength ?? 1.0, style: "width:80px",
+                  oninput: (e) => {
+                    const n = Number(e.target.value.trim());
+                    if (e.target.value.trim() !== "" && Number.isFinite(n)) item.strength = n;
+                  },
+                })),
+                h("td", {}, h("button", { class: "sm ghost", onclick: () => {
+                  projState.loras.splice(idx, 1);
+                  drawProjLoras();
+                } }, "刪除列"))))))
+          : h("div", { class: "small muted" }, "這個專案目前沒有專屬 LoRA（直接使用 ComfyUI profile 的設定）。"),
+        warn,
+        h("div", { class: "row wrap", style: "margin-top:8px;gap:8px;align-items:center" },
+          h("button", { class: "sm", onclick: () => {
+            projState.loras.push({ name: "", strength: 1.0, on: true });
+            drawProjLoras();
+          } }, "新增 LoRA"),
+          h("button", { class: "sm ghost", onclick: async () => {
+            loraFetchStatus.textContent = "抓清單中…";
+            try {
+              const m = await api("/api/settings/comfyui/models");
+              projComfyLoras = (m && m.lora) || [];
+              loraFetchStatus.textContent = `✔ 抓到 ${projComfyLoras.length} 個 LoRA`;
+              drawProjLoras();
+            } catch (error) {
+              loraFetchStatus.textContent = "✖ " + error.message;
+            }
+          } }, "抓 ComfyUI LoRA 清單"),
+          loraFetchStatus));
+    };
+    drawProjLoras();
+
+    const stylePane = h("div", {},
+      h("div", { class: "card" },
+        h("h3", { style: "margin-top:0" }, "本專案畫風與出圖 Profile（寫入 project.yaml）"),
+        h("div", { class: "row wrap", style: "gap:12px;align-items:center;margin-bottom:8px" },
+          h("label", { class: "small" }, "出圖 Profile ",
+            h("select", { onchange: (e) => { projState.comfy_profile = e.target.value; } },
+              [["", defaultProfLabel]].concat(comfyProfiles.map((p) => [p, p]))
+                .map(([v, label]) => h("option", { value: v, selected: projState.comfy_profile === v }, label)))),
+          h("label", { class: "small" }, "畫風預設集 ",
+            h("select", { onchange: (e) => { projState.style_preset = e.target.value; updatePresetHint(); } },
+              (Object.keys(stylePresets).length ? Object.keys(stylePresets) : ["mono", "color", "american"])
+                .map((k) => h("option", { value: k, selected: projState.style_preset === k },
+                  stylePresets[k] ? `${stylePresets[k].name}（${k}）` : k)))),
+          h("label", { class: "small" }, "狀聲詞繪製 ",
+            h("select", { onchange: (e) => { projState.sfx_mode = e.target.value; } },
+              [["overlay", "嵌字程式疊上（可在嵌字頁移動縮放）"], ["moss", "交給生圖模型直接畫"]]
+                .map(([v, label]) => h("option", { value: v, selected: projState.sfx_mode === v }, label))))),
+        presetHint,
+        h("details", { style: "margin-top:10px", open: (projState.style || projState.meta || projState.look) ? true : undefined },
+          h("summary", { class: "small", style: "cursor:pointer" }, "進階：自訂畫風覆蓋（留空＝沿用上面的畫風預設集）"),
+          h("div", { style: "margin-top:8px" },
+            h("div", { class: "small muted" }, "生圖畫風英文描述（style）"),
+            (() => {
+              const ta = h("textarea", { rows: 2, style: "width:100%", placeholder: "留空＝沿用畫風預設集",
+                oninput: (e) => { projState.style = e.target.value; } }, projState.style);
+              if (window.attachTagComplete) window.attachTagComplete(ta);
+              return ta;
+            })(),
+            h("div", { class: "small muted", style: "margin-top:6px" }, "畫風標籤（meta，逗號分隔）"),
+            (() => {
+              const inp = h("input", { value: projState.meta, style: "width:100%", placeholder: "例如：manga panel, full color, watercolor",
+                oninput: (e) => { projState.meta = e.target.value; } });
+              if (window.attachTagComplete) window.attachTagComplete(inp);
+              return inp;
+            })(),
+            h("div", { class: "small muted", style: "margin-top:6px" }, "給劇本／分鏡 AI 看的畫風描述（look）"),
+            h("input", { value: projState.look, style: "width:100%", placeholder: "留空＝沿用畫風預設集",
+              oninput: (e) => { projState.look = e.target.value; } })))),
+      h("div", { class: "card" },
+        h("h3", { style: "margin-top:0" }, "本專案專屬 LoRA（寫入 settings.json）"),
+        h("div", { class: "row wrap", style: "gap:10px;align-items:center;margin-bottom:8px" },
+          h("label", { class: "small" }, "與全域 Profile LoRA 的關係 ",
+            h("select", { onchange: (e) => { projState.lora_mode = e.target.value; } },
+              [["append", "疊加在全域 Profile LoRA 後面（預設）"], ["replace", "取代全域 Profile LoRA（只用本專案這份）"]]
+                .map(([v, label]) => h("option", { value: v, selected: projState.lora_mode === v }, label))))),
+        loraListHost,
+        h("div", { class: "row wrap", style: "margin-top:12px;gap:10px;align-items:center" },
+          h("button", { class: "primary", onclick: async () => {
+            try {
+              await api(`${base}/${projectId}/settings`, {
+                method: "PUT",
+                body: {
+                  project: {
+                    comfy_profile: projState.comfy_profile,
+                    style_preset: projState.style_preset,
+                    style: projState.style,
+                    meta: projState.meta,
+                    look: projState.look,
+                    sfx_mode: projState.sfx_mode,
+                  },
+                  loras: projState.loras,
+                  lora_mode: projState.lora_mode,
+                },
+              });
+              toast("本專案畫風與 LoRA 已存", "ok");
+              await show();
+            } catch (error) { failIt(error); }
+          } }, "儲存畫風與 LoRA"),
+          h("span", { class: "small muted" }, "變更畫風或 LoRA 後，已出過圖的章節需重新出圖才會套用。"))));
+
+    // 子分頁 3：嵌字與字型
+    const lettering = settings.lettering || {};
+    const fontRow = (key, label) => h("div", { class: "row wrap", style: "margin-bottom:6px" },
+      h("span", { class: "small", style: "width:72px" }, label),
+      h("input", { id: `comic_font_${key}`, value: lettering[key] || "", style: "flex:1;min-width:260px",
+        placeholder: "留空＝自動找（Noto CJK／思源／正黑體）" }));
+    const letteringPane = h("div", {},
+      h("div", { class: "card" }, h("h3", { style: "margin-top:0" }, "漫畫設定（嵌字）"),
+        h("div", { class: "small muted", style: "margin-bottom:4px" }, "字型填完整路徑（TTC 可用「檔名#索引」）；字型檔不進 git，只記路徑。可變字型（例如 NotoSansTC-VF.ttf）的字重由程式依角色套上。"),
+        h("div", { class: "small", style: "margin-bottom:10px" }, "可隨成品發佈：Noto Sans TC、Noto Serif TC（SIL OFL 1.1）。不可發佈：微軟正黑體 msjh／msjhbd、細明體 mingliu（Windows 內建，只供自己看）。"),
         fontRow("dialogue_font", "對白"), fontRow("shout_font", "喊叫"),
         fontRow("narration_font", "旁白"), fontRow("sfx_font", "狀聲詞"),
-        h("div", { class: "row wrap" },
+        h("div", { class: "row wrap", style: "margin-top:10px" },
           h("label", {}, h("input", { type: "checkbox", id: "comic_vertical", checked: lettering.vertical !== false }), " 直排"),
           h("span", { class: "small" }, "對白字級"),
           h("input", { type: "number", id: "comic_dialogue_pt", min: 4, max: 48, step: 0.5, value: lettering.dialogue_pt || 9, style: "width:80px" }),
           h("span", { class: "small" }, "旁白字級"),
           h("input", { type: "number", id: "comic_narration_pt", min: 4, max: 48, step: 0.5, value: lettering.narration_pt || 8.5, style: "width:80px" }),
-          h("button", { class: "primary", onclick: () => saveSettings() }, "儲存設定")),
+          h("button", { class: "primary", onclick: () => saveSettings() }, "儲存字型設定")),
         (settings.problems || []).length
-          ? h("div", { class: "small" }, settings.problems.map((text) => h("div", {}, text))) : ""));
-    }
+          ? h("div", { class: "small", style: "margin-top:8px" }, settings.problems.map((text) => h("div", {}, text))) : ""));
+
+    const subPanes = { overview: overviewPane, style: stylePane, lettering: letteringPane };
+    const subBtns = {};
+    const selectSub = (key) => {
+      projSubTab = key;
+      FE.store.set("comic_proj_subtab", key);
+      for (const [k] of SUBTABS) {
+        subPanes[k].hidden = k !== key;
+        subBtns[k].className = tabClass(k === key);
+      }
+    };
+    const subBar = h("div", { class: "tabs", style: "margin-bottom:10px" }, SUBTABS.map(([k, label]) => {
+      const btn = h("div", { class: tabClass(k === projSubTab), onclick: () => selectSub(k) }, label);
+      subBtns[k] = btn;
+      return btn;
+    }));
+    selectSub(projSubTab);
+    wrap.append(subBar, overviewPane, stylePane, letteringPane);
     return wrap;
   }
 
@@ -402,7 +643,8 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
   };
 
   function boardPanel(panel, row, image) {
-    const pick = row && row.pick;
+    const rawPick = row && row.pick;
+    const pick = typeof rawPick === "string" ? rawPick : (rawPick && (rawPick.image || rawPick.file)) || "";
     const bubbles = (panel.bubbles || []).map((bubble) => {
       const kind = LETTER_KIND_LABEL[(bubble && bubble.kind) || ""] || (bubble && bubble.kind) || "對白";
       const who = bubble && bubble.speaker ? `${bubble.speaker}：` : "";
@@ -418,7 +660,7 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
         h("span", { class: "grow" }),
         h("span", { class: "small muted" }, pick ? "已選圖" : "未選圖")),
       pick
-        ? h("img", { src: image(pick, "render"), title: pick, style: "width:100%;border-radius:8px;margin:8px 0" })
+        ? h("img", { src: image(pick, "render"), title: pick, style: "width:100%;max-height:220px;object-fit:contain;background:var(--bg);border-radius:8px;margin:8px 0" })
         : h("div", { class: "small muted", style: "margin:8px 0" }, "尚未選圖（到「出圖」分頁挑一張）"),
       panel.scene ? h("div", { class: "small", style: "margin-bottom:6px" }, panel.scene) : "",
       (panel.characters || []).length
@@ -449,18 +691,76 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
       for (const row of panelPayload.panels || []) rows[row.id] = row;
     } catch (error) { panelsBroken = true; }   // 選圖狀態讀不到不擋看板，只是沒有縮圖
     const total = pages.reduce((sum, page) => sum + (page.panels || []).length, 0);
+    const pickedOf = (panel) => {
+      const r = rows[panel.id];
+      const raw = r && r.pick;
+      return typeof raw === "string" ? raw : (raw && (raw.image || raw.file)) || "";
+    };
+    const pageNums = pages.map((p) => p.page);
+    if (boardPage !== "all" && !pageNums.includes(boardPage)) {
+      boardPage = pageNums[0];
+    }
+
     const wrap = h("div");
     wrap.append(h("div", { class: "card" }, h("h3", {}, "分鏡（唯讀）"),
       h("div", { class: "small muted" }, `第 ${chapter} 章 · ${pages.length} 頁 · ${total} 格。台詞以分鏡檔為準；在「嵌字」分頁改過的文字請看嵌字頁。`),
       panelsBroken ? h("div", { class: "small muted" }, "選圖狀態讀不到，縮圖先不顯示。") : "",
       h("details", { style: "margin-top:8px" }, h("summary", { class: "small" }, "看整章 JSON"),
         h("pre", { class: "log", style: "max-height:360px" }, JSON.stringify(doc, null, 2)))));
-    for (const page of pages) {
-      const panels = page.panels || [];
-      wrap.append(h("div", { class: "card" }, h("h3", {}, `第 ${page.page} 頁`),
-        h("div", { class: "small muted", style: "margin-bottom:8px" }, `${page.template || "（沒有模板）"}　${panels.length} 格`),
-        h("div", { class: "grid" }, panels.map((panel) => boardPanel(panel, rows[panel.id], image)))));
-    }
+
+    const pageBarHost = h("div", { class: "row wrap", style: "gap:6px;margin-bottom:8px;align-items:center" });
+    const navBarHost = h("div", { class: "row wrap", style: "gap:8px;margin-bottom:10px;align-items:center" });
+    const pagesHost = h("div");
+
+    const drawBoard = () => {
+      pageBarHost.replaceChildren(
+        ...pages.map((page) => {
+          const panels = page.panels || [];
+          const doneCount = panelsBroken ? 0 : panels.filter((pl) => Boolean(pickedOf(pl))).length;
+          const full = !panelsBroken && panels.length > 0 && doneCount === panels.length;
+          const active = boardPage === page.page;
+          const label = panelsBroken
+            ? `第 ${page.page} 頁（${panels.length} 格）`
+            : `第 ${page.page} 頁 ${doneCount}/${panels.length}${full ? " ✓" : ""}`;
+          return h("button", {
+            class: active ? "sm primary" : "sm",
+            style: !active && full ? "border-color:var(--ok);color:var(--ok)" : "",
+            onclick: () => { boardPage = page.page; drawBoard(); },
+          }, label);
+        }),
+        h("button", {
+          class: boardPage === "all" ? "sm primary" : "sm ghost",
+          onclick: () => { boardPage = "all"; drawBoard(); },
+        }, `全部（${total} 格）`)
+      );
+
+      if (boardPage !== "all") {
+        const idx = pageNums.indexOf(boardPage);
+        navBarHost.style.display = "";
+        navBarHost.replaceChildren(
+          h("button", { class: "sm ghost", disabled: idx <= 0,
+            onclick: () => { boardPage = pageNums[idx - 1]; drawBoard(); } }, "← 上一頁"),
+          h("button", { class: "sm ghost", disabled: idx < 0 || idx >= pageNums.length - 1,
+            onclick: () => { boardPage = pageNums[idx + 1]; drawBoard(); } }, "下一頁 →"),
+          h("span", { class: "small muted" }, `目前第 ${idx + 1} / ${pageNums.length} 頁`)
+        );
+      } else {
+        navBarHost.style.display = "none";
+        navBarHost.replaceChildren();
+      }
+
+      const shown = boardPage === "all" ? pages : pages.filter((p) => p.page === boardPage);
+      pagesHost.replaceChildren(...shown.map((page) => {
+        const panels = page.panels || [];
+        return h("div", { class: "card", style: "margin-top:0" },
+          h("h3", { style: "margin-top:0" }, `第 ${page.page} 頁`),
+          h("div", { class: "small muted", style: "margin-bottom:8px" }, `${page.template || "（沒有模板）"}　${panels.length} 格`),
+          h("div", { class: "grid" }, panels.map((panel) => boardPanel(panel, rows[panel.id], image))));
+      }));
+    };
+
+    drawBoard();
+    wrap.append(h("div", { class: "card" }, pageBarHost, navBarHost, pagesHost));
     return wrap;
   }
 
@@ -474,35 +774,132 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
       step: "1", value: renderCandidates, placeholder: "專案設定", style: "width:7em",
       title: "每格要畫幾張候選；留空＝專案設定（project.yaml 的 candidates）",
       oninput: (event) => { renderCandidates = event.target.value; } });
+    const canCompile = Boolean(status.storyboard_pages);
+    const rows = canCompile ? ((await api(`${base}/${projectId}/chapter/${chapter}/panels`, { signal: ctx.signal })).panels || []) : [];
+    const pickable = rows.filter((row) => {
+      const pickedFile = row.pick && typeof row.pick === "object" ? (row.pick.image || "") : (row.pick || "");
+      return !pickedFile && (row.candidates || []).length > 0;
+    });
+    const autoPickBtn = h("button", {
+      disabled: !pickable.length,
+      title: "把還沒選圖、但已經有候選圖的格子，全部先選第 1 張（之後隨時可換）",
+      onclick: async () => {
+        if (!pickable.length) return;
+        autoPickBtn.disabled = true;
+        let ok = 0;
+        try {
+          for (const row of pickable) {
+            const first = (row.candidates || [])[0];
+            const file = (first && first.file) || String(first || "");
+            if (!file) continue;
+            await api(`${base}/${projectId}/chapter/${chapter}/pick`, { body: { panel: row.id, image: file } });
+            ok += 1;
+          }
+          toast(`已替 ${ok} 格先選第 1 張`, "ok");
+          show();
+        } catch (error) {
+          failIt(error);
+          if (ok) show();
+        } finally {
+          autoPickBtn.disabled = false;
+        }
+      },
+    }, pickable.length ? `未選圖先選第 1 張（${pickable.length} 格）` : "未選圖先選第 1 張");
     wrap.append(h("div", { class: "card" }, h("h3", {}, `第 ${chapter} 章 · 出圖`),
       h("div", { class: "row wrap" },
         h("button", { class: "primary", onclick: () => runRender({}, "整章") }, "出圖（ComfyUI）"),
+        autoPickBtn,
         h("label", { class: "small muted" }, "候選張數 ", candidateInput)),
       h("div", { class: "small muted" }, "出完在下面每格挑一張；組版與下載在「頁面與輸出」分頁。")));
-    const canCompile = Boolean(status.storyboard_pages);
-    const rows = canCompile ? ((await api(`${base}/${projectId}/chapter/${chapter}/panels`, { signal: ctx.signal })).panels || []) : [];
     if (!canCompile) {
       wrap.append(h("div", { class: "card muted" }, "這一章還沒有分鏡；先到「章節」分頁跑完四個文字階段。"));
     } else if (!rows.length) {
       wrap.append(h("div", { class: "card muted" }, "分鏡還沒有可編譯的格子。"));
     } else {
-      wrap.append(h("div", { class: "card" }, h("h3", {}, "每一格"),
-        h("div", { class: "grid" }, rows.map((row) => {
+      const pickedOf = (r) => (r.pick && typeof r.pick === "object" ? (r.pick.image || "") : (r.pick || ""));
+      const pageNums = [...new Set(rows.map((r) => r.page))].sort((a, b) => a - b);
+      if (renderPage !== "all" && !pageNums.includes(renderPage)) {
+        const firstIncomplete = pageNums.find((p) => rows.some((r) => r.page === p && !pickedOf(r)));
+        renderPage = firstIncomplete !== undefined ? firstIncomplete : pageNums[0];
+      }
+
+      const pageBarHost = h("div", { class: "row wrap", style: "gap:6px;margin-bottom:8px" });
+      const filterBarHost = h("div", { class: "row wrap", style: "gap:8px;align-items:center;margin-bottom:10px" });
+      const gridHost = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px" });
+
+      const drawPanels = () => {
+        pageBarHost.replaceChildren(
+          ...pageNums.map((p) => {
+            const pRows = rows.filter((r) => r.page === p);
+            const doneCount = pRows.filter((r) => Boolean(pickedOf(r))).length;
+            const full = doneCount === pRows.length;
+            const active = renderPage === p;
+            return h("button", {
+              class: active ? "sm primary" : "sm",
+              style: !active && full ? "border-color:var(--ok);color:var(--ok)" : "",
+              onclick: () => { renderPage = p; drawPanels(); },
+            }, `第 ${p} 頁 ${doneCount}/${pRows.length}${full ? " ✓" : ""}`);
+          }),
+          h("button", {
+            class: renderPage === "all" ? "sm primary" : "sm ghost",
+            onclick: () => { renderPage = "all"; drawPanels(); },
+          }, `全部（${rows.length} 格）`)
+        );
+
+        const moreInput = h("input", {
+          type: "number", min: "1", max: "8", step: "1", value: String(renderPageMore),
+          style: "width:4.5em",
+          oninput: (e) => { const n = Number(e.target.value); if (n >= 1 && n <= 8) renderPageMore = n; },
+        });
+        const pageActions = renderPage !== "all"
+          ? [
+              h("span", { class: "grow" }),
+              h("button", { class: "sm", onclick: () => runRender({ page: renderPage }, `只補第 ${renderPage} 頁`) }, `補第 ${renderPage} 頁`),
+              h("label", { class: "row small", style: "gap:4px;align-items:center" }, "全頁多出", moreInput, "張"),
+              h("button", { class: "sm primary", onclick: () => runRender({ page: renderPage, more: renderPageMore }, `第 ${renderPage} 頁各加畫 ${renderPageMore} 張`) },
+                `第 ${renderPage} 頁各加畫 ${renderPageMore} 張`),
+            ]
+          : [];
+        moreInput.addEventListener("input", () => {
+          const btn = filterBarHost.querySelector("[data-page-more-btn]");
+          if (btn) btn.textContent = `第 ${renderPage} 頁各加畫 ${renderPageMore} 張`;
+        });
+        if (pageActions.length) pageActions[pageActions.length - 1].setAttribute("data-page-more-btn", "1");
+
+        filterBarHost.replaceChildren(
+          ...[["all", "全部"], ["unpicked", "只看未選圖"], ["empty", "只看缺圖（0 候選）"]].map(([k, label]) =>
+            h("button", { class: renderFilter === k ? "sm primary" : "sm ghost", onclick: () => { renderFilter = k; drawPanels(); } }, label)),
+          ...pageActions
+        );
+
+        const visible = rows.filter((r) => {
+          if (renderPage !== "all" && r.page !== renderPage) return false;
+          if (renderFilter === "unpicked") return !pickedOf(r);
+          if (renderFilter === "empty") return !(r.candidates || []).length;
+          return true;
+        });
+
+        if (!visible.length) {
+          gridHost.replaceChildren(h("div", { class: "muted small" }, "這一頁沒有符合篩選條件的格子。"));
+          return;
+        }
+        gridHost.replaceChildren(...visible.map((row) => {
           const candidates = row.candidates || [];
-          const pickedFile = row.pick && typeof row.pick === "object" ? (row.pick.image || "") : (row.pick || "");   // t2c 的 pick 是 {image, focus, zoom}
-          return h("div", { class: "card" },
+          const pickedFile = pickedOf(row);   // t2c 的 pick 是 {image, focus, zoom}
+          return h("div", { class: "card", style: "margin:0" },
             h("div", { class: "row" }, h("strong", {}, row.id || ""), h("span", { class: "grow" }),
               h("span", { class: "small muted" },
                 `第 ${row.page} 頁　${pickedFile ? "已選" : `${candidates.length} 張候選`}`)),
-            h("div", { class: "row wrap" },
+            h("div", { class: "row wrap", style: "margin:6px 0" },
               h("button", { class: "sm", onclick: () => runRender({ panel: row.id, page: row.page }, `只補 ${row.id}`) }, "補這一格"),
               h("button", { class: "sm", onclick: () => runRender({ panel: row.id, page: row.page, more: 1 }, `加畫 ${row.id}`) }, "加畫一張"),
-              h("button", { class: "sm", onclick: () => runRender({ page: row.page }, `只補第 ${row.page} 頁`) }, "補這一頁")),
-            h("div", { class: "row wrap" }, candidates.map((candidate) => {
+              h("button", { class: "sm ghost", onclick: () => runRender({ page: row.page }, `只補第 ${row.page} 頁`) }, "補這一頁")),
+            h("div", { class: "row wrap", style: "gap:6px" }, candidates.map((candidate) => {
               const file = (candidate && candidate.file) || String(candidate);   // /panels 給的是 {file, seed, ...}
               const picked = pickedFile === file;
               return h("div", { style: "position:relative" },
-                h("img", { src: image(file, "render"), style: "width:120px;cursor:pointer" + (picked ? ";outline:3px solid var(--accent)" : ""),
+                h("img", { src: image(file, "render"), loading: "lazy",
+                  style: "width:110px;height:110px;object-fit:cover;border-radius:6px;cursor:pointer" + (picked ? ";outline:3px solid var(--accent)" : ""),
                   title: file,
                   onclick: async () => {
                     try {
@@ -512,7 +909,7 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
                     } catch (error) { failIt(error); }
                   } }),
                 h("button", { class: "sm ghost", disabled: picked,
-                  style: "position:absolute;top:0;right:0;padding:0 5px;line-height:1.5",
+                  style: "position:absolute;top:0;right:0;padding:0 5px;line-height:1.5;background:rgba(0,0,0,0.55);color:#fff",
                   title: picked ? "已選中的那張不能刪；先改選別張" : "刪掉這張候選圖",
                   onclick: async (event) => {
                     event.stopPropagation();
@@ -525,7 +922,11 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
                     } catch (error) { failIt(error); }
                   } }, "✕"));
             })));
-        }))));
+        }));
+      };
+
+      drawPanels();
+      wrap.append(h("div", { class: "card" }, pageBarHost, filterBarHost, gridHost));
     }
 
 
@@ -542,10 +943,10 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
     wrap.append(h("div", { class: "card" }, h("h3", {}, `第 ${chapter} 章 · 輸出`),
       h("div", { class: "row wrap" },
         h("button", { class: "sm", onclick: () => runCompose() }, "組版（產生頁面）"),
-        ...["pdf", "cbz"].map((kind) => (pagesOut > 0
-          ? h("a", { class: "btn sm", href: `${base}/${projectId}/chapter/${chapter}/file?kind=${kind}`, target: "_blank" }, `下載 ${kind.toUpperCase()}`)
-          : h("button", { class: "sm", disabled: true, title: "先按「組版（產生頁面）」" }, `下載 ${kind.toUpperCase()}`)))),
-      pagesOut > 0 ? "" : h("div", { class: "small muted" }, "還沒有頁面圖：先到「出圖」分頁出圖，回來按「組版（產生頁面）」，才能下載 PDF／CBZ。")));
+        ...[["pdf", "下載 PDF"], ["cbz", "下載 CBZ"], ["zip", "下載 PNG（ZIP）"]].map(([kind, label]) => (pagesOut > 0
+          ? h("a", { class: "btn sm", href: `${base}/${projectId}/chapter/${chapter}/file?kind=${kind}`, target: "_blank" }, label)
+          : h("button", { class: "sm", disabled: true, title: "先按「組版（產生頁面）」" }, label)))),
+      pagesOut > 0 ? "" : h("div", { class: "small muted" }, "還沒有頁面圖：先到「出圖」分頁出圖，回來按「組版（產生頁面）」，才能下載 PDF／CBZ／PNG 壓縮檔。")));
     const pages = await api(`${base}/${projectId}/chapter/${chapter}/pages`, { signal: ctx.signal });
     const files = pages.files || [];
     wrap.append(h("div", { class: "card" }, h("h3", {}, "頁面"),
@@ -620,6 +1021,73 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
       node.style.width = pct(bubble.rx * 2, size[0]);
       node.style.height = pct(bubble.ry * 2, size[1]);
     }
+    function findSfx(panelId, index) {
+      const entry = lettersState.panels[panelId];
+      const list = entry && Array.isArray(entry.sfx) ? entry.sfx : null;
+      const item = list && list[index];
+      return item && typeof item === "object" ? item : null;
+    }
+    function ensureSfx(panelId, index) {
+      const panels = lettersState.panels || (lettersState.panels = {});
+      if (!panels[panelId]) panels[panelId] = {};
+      const entry = panels[panelId];
+      if (!Array.isArray(entry.sfx)) entry.sfx = [];
+      while (entry.sfx.length <= index) entry.sfx.push({});
+      if (!entry.sfx[index]) entry.sfx[index] = {};
+      return entry.sfx[index];
+    }
+    function placeBox(node, rect) {
+      node.style.left = pct(rect[0], size[0]);
+      node.style.top = pct(rect[1], size[1]);
+      node.style.width = pct(rect[2] - rect[0], size[0]);
+      node.style.height = pct(rect[3] - rect[1], size[1]);
+    }
+    function startSfxDrag(event, mode, panel, sfx, node) {
+      event.preventDefault();
+      event.stopPropagation();
+      const bounds = canvas.getBoundingClientRect();
+      const pw = panel.rect[2] - panel.rect[0];
+      const ph = panel.rect[3] - panel.rect[1];
+      const startBox = [sfx.box[0], sfx.box[1], sfx.box[2], sfx.box[3]];
+      const bw = startBox[2] - startBox[0];
+      const bh = startBox[3] - startBox[1];
+      const startPx = ((event.clientX - bounds.left) / bounds.width) * size[0];
+      const startPy = ((event.clientY - bounds.top) / bounds.height) * size[1];
+      const minW = Math.max(20, pw * 0.04);
+      const minH = Math.max(20, ph * 0.04);
+      const move = (moveEvent) => {
+        const px = ((moveEvent.clientX - bounds.left) / bounds.width) * size[0];
+        const py = ((moveEvent.clientY - bounds.top) / bounds.height) * size[1];
+        let next;
+        if (mode === "resize") {
+          const x1 = Math.min(panel.rect[2], Math.max(startBox[0] + minW, startBox[2] + (px - startPx)));
+          const y1 = Math.min(panel.rect[3], Math.max(startBox[1] + minH, startBox[3] + (py - startPy)));
+          next = [startBox[0], startBox[1], x1, y1];
+        } else {
+          const dx = px - startPx;
+          const dy = py - startPy;
+          const x0 = Math.min(panel.rect[2] - bw, Math.max(panel.rect[0], startBox[0] + dx));
+          const y0 = Math.min(panel.rect[3] - bh, Math.max(panel.rect[1], startBox[1] + dy));
+          next = [x0, y0, x0 + bw, y0 + bh];
+        }
+        sfx.box = next;
+        placeBox(node, next);
+        const override = ensureSfx(panel.id, sfx.index);
+        override.box = [
+          round4(clamp01((next[0] - panel.rect[0]) / pw)),
+          round4(clamp01((next[1] - panel.rect[1]) / ph)),
+          round4(clamp01((next[2] - panel.rect[0]) / pw)),
+          round4(clamp01((next[3] - panel.rect[1]) / ph)),
+        ];
+        markDirty();
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    }
     function startDrag(event, field, panel, bubble, node) {
       event.preventDefault();
       event.stopPropagation();
@@ -675,9 +1143,17 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
         }
         for (const sfx of panel.sfx || []) {
           const box = sfx.box;
-          canvas.append(h("div", { title: `狀聲詞（唯讀）：${sfx.text || ""}`,
-            style: boxStyle(box, "border:1px dotted rgba(255,210,120,.7);pointer-events:none;display:flex;"
-              + "align-items:center;justify-content:center;color:#ffd278;font-size:12px") }, sfx.text || ""));
+          const sfxNode = h("div", { title: `狀聲詞：${sfx.text || ""}（拖框身移動，拖右下角縮放）`,
+            style: boxStyle(box, "border:2px dashed rgba(255,210,120,.9);background:rgba(255,190,70,.16);"
+              + "cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;"
+              + "color:#ffd278;font-size:12px;font-weight:600;border-radius:6px") }, sfx.text || "");
+          sfxNode.onpointerdown = (event) => startSfxDrag(event, "move", panel, sfx, sfxNode);
+          const sfxHandle = h("div", { title: "拖我縮放狀聲詞框",
+            style: "position:absolute;right:-4px;bottom:-4px;width:14px;height:14px;border-radius:3px;"
+              + "background:#ffd278;border:1px solid #333;cursor:nwse-resize;touch-action:none" });
+          sfxHandle.onpointerdown = (event) => startSfxDrag(event, "resize", panel, sfx, sfxNode);
+          sfxNode.append(sfxHandle);
+          canvas.append(sfxNode);
         }
         for (const bubble of panel.bubbles) {
           const node = h("div", { title: `${LETTER_KIND_LABEL[bubble.kind] || bubble.kind}${bubble.speaker ? "・" + bubble.speaker : ""}（拖我改位置）`,
@@ -701,9 +1177,9 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
       }
     }
 
-    const list = h("div", { class: "card" }, h("h3", {}, "對話框"),
+    const list = h("div", { class: "card" }, h("h3", {}, "對話框與狀聲詞"),
       h("div", { class: "small muted" },
-        "拖框身改位置，拖黃點改尾巴。字級 0.5–2.0、行數 1–40；留空＝自動。faces／sfx 只顯示，不改。"));
+        "對話框拖框身改位置、拖黃點改尾巴；狀聲詞拖框身移動、拖右下角縮放。字級 0.5–2.0、行數 1–40；留空＝自動。faces 只顯示，不改。"));
     if (plan) {
       for (const panel of plan.panels) {
         list.append(h("div", { style: "border-top:1px solid var(--line);padding:10px 0" },
@@ -760,6 +1236,38 @@ FE.PAGES["book/:id/comic"] = async (ctx) => {
                 delete ensureBubble(panel.id, bubble.index).tail;
                 markDirty();
               } }, "尾巴回自動"))));
+        }
+        for (const sfx of panel.sfx || []) {
+          const over = findSfx(panel.id, sfx.index) || {};
+          const angle = h("input", { type: "number", min: "-45", max: "45", step: "1", style: "width:6em", placeholder: "-8" });
+          angle.value = typeof over.angle === "number" ? over.angle : "";
+          angle.onchange = () => {
+            const target = ensureSfx(panel.id, sfx.index);
+            const value = Number(angle.value);
+            if (angle.value === "") delete target.angle;
+            else if (Number.isFinite(value) && value >= -45 && value <= 45) target.angle = value;
+            else { angle.value = ""; delete target.angle; }
+            markDirty();
+          };
+          const dir = h("select", { onchange: () => {
+            const target = ensureSfx(panel.id, sfx.index);
+            if (dir.value === "") delete target.vertical;
+            else target.vertical = dir.value === "vertical";
+            markDirty();
+          } },
+            [["", "自動"], ["vertical", "直排"], ["horizontal", "橫排"]].map(([v, label]) =>
+              h("option", { value: v, selected: (typeof over.vertical === "boolean" ? (over.vertical ? "vertical" : "horizontal") : "") === v }, label)));
+          list.append(h("div", { style: "padding:6px 0 2px;border-top:1px dashed var(--line)" },
+            h("div", { class: "row wrap", style: "gap:8px;align-items:center" },
+              h("span", { class: "small", style: "color:var(--warn);font-weight:600" }, `狀聲詞 ${sfx.index + 1}. ${sfx.text || ""}`),
+              h("label", { class: "small" }, "角度 ", angle, "°"),
+              h("label", { class: "small" }, "方向 ", dir),
+              h("button", { class: "sm ghost", onclick: () => {
+                const target = ensureSfx(panel.id, sfx.index);
+                delete target.box; delete target.angle; delete target.vertical;
+                angle.value = ""; dir.value = "";
+                markDirty();
+              } }, "重設這個狀聲詞"))));
         }
       }
     }

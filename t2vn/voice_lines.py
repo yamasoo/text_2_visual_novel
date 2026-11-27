@@ -146,9 +146,10 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(config: Any, path: Path, data: Any) -> None:
+    from .atomic import write_atomic
+
     config.assert_writable(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def load_scene_docs(work: Path) -> list[dict[str, Any]]:

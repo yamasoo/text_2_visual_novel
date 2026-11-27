@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import appearance_card, appearance_draft, art_styles, wildcards
+from .atomic import write_atomic
 
 ENABLED_FILE = "wildcards_enabled.json"
 SKIP_CHARACTERS = ("player",)
@@ -71,12 +72,9 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(assert_writable: Callable[[Path], Any], path: Path, data: Any) -> None:
-    """先問權限、建父資料夾，再寫 JSON（UTF-8、``indent=2``、結尾換行）。"""
+    """先問權限、建父資料夾，再原子寫 JSON（UTF-8、``indent=2``、結尾換行）。"""
     assert_writable(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding=UTF8
-    )
+    write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding=UTF8)
 
 
 # ---------------------------------------------------------------- wildcard 啟用
@@ -197,6 +195,11 @@ def _sync_style(
     entry = dict(entry) if isinstance(entry, dict) else {}
     entry["tags"] = tags
     entry["headshot_tags"] = head
+    expr_prompts = card.get("expression_prompts")
+    if isinstance(expr_prompts, dict) and expr_prompts:
+        entry["expression_prompts"] = dict(expr_prompts)
+    else:
+        entry.pop("expression_prompts", None)
     entry.setdefault("description", "")
     entry.setdefault("notes", "")
     entry["confirmed"] = bool(card.get("confirmed"))
@@ -217,15 +220,19 @@ def save_card(
     介面送來的是整份卡；沒帶到的 ``t2c`` 子物件（D26）沿用舊檔，不然存一次就被洗掉。
     """
     _check_id(char_id)
-    if isinstance(data, dict) and "t2c" not in data:
+    if isinstance(data, dict) and ("t2c" not in data or "expression_prompts" not in data):
         path = card_path(work, char_id)
         if path.is_file():
             try:
                 previous = appearance_card.load_card(path)
             except (OSError, ValueError):
                 previous = {}
-            if isinstance(previous.get("t2c"), dict):
-                data = {**data, "t2c": previous["t2c"]}
+            merged = dict(data)
+            if "t2c" not in merged and isinstance(previous.get("t2c"), dict):
+                merged["t2c"] = previous["t2c"]
+            if "expression_prompts" not in merged and isinstance(previous.get("expression_prompts"), dict):
+                merged["expression_prompts"] = previous["expression_prompts"]
+            data = merged
     try:
         card = appearance_card.normalize_card(data, char_id)
     except ValueError as exc:
@@ -277,15 +284,17 @@ def draft_card(
     llm: Callable[[str], str],
     current: dict[str, Any] | None = None,
     retries: int = 1,
+    world_context: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     """請 AI 草擬外型卡；回覆格式不對時重問，最多重問 ``retries`` 次。
 
-    回傳的新卡保留 ``current`` 的表情勾選與備註（``current`` 不是 dict 就用預設）。
+    回傳的新卡保留 ``current`` 的表情勾選、專屬表情提示詞與備註（``current`` 不是 dict 就用預設）；
+    若 AI 同時產出結構化 ``t2c``，直接寫入新卡（並附新指紋），避免舊 t2c 過期殘留。
     """
     _check_id(char_id)
     usable = usable_library(library or {}, enabled)
     base = appearance_draft.build_prompt(
-        character, evidence, wildcards.describe_library(usable), current
+        character, evidence, wildcards.describe_library(usable), current, world_context=world_context
     )
     prompt = base
     last_error = ""
@@ -313,17 +322,19 @@ def draft_card(
 
         expressions = current.get("expressions") if isinstance(current, dict) else None
         notes = current.get("notes", "") if isinstance(current, dict) else ""
-        card = appearance_card.normalize_card(
-            {
-                "char_id": char_id,
-                "confirmed": False,
-                "headshot_prompt": fields["headshot_prompt"],
-                "sprite_prompt": fields["sprite_prompt"],
-                "expressions": expressions,
-                "notes": notes,
-            },
-            char_id,
-        )
+        payload: dict[str, Any] = {
+            "char_id": char_id,
+            "confirmed": False,
+            "headshot_prompt": fields["headshot_prompt"],
+            "sprite_prompt": fields["sprite_prompt"],
+            "expressions": expressions,
+            "notes": notes,
+        }
+        if isinstance(current, dict) and isinstance(current.get("expression_prompts"), dict):
+            payload["expression_prompts"] = current["expression_prompts"]
+        if isinstance(fields.get("t2c"), dict):
+            payload["t2c"] = fields["t2c"]
+        card = appearance_card.normalize_card(payload, char_id)
         return card, warns
     raise ArtCardsError(f"AI 的回覆格式不對（{last_error}），請再試一次")
 

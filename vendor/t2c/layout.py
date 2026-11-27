@@ -7,6 +7,10 @@
 
 版型（N4）：預設讀套件自帶的 t2c/data/pages.json；專案可以在 project.yaml 用 layout 指定外部版型檔，
 mode: merge（預設，疊加：同名的模板換掉、其他的留著）或 mode: replace（只用專案檔的模板）。
+
+斜格（V3，決策 D19）：模板可以多一個 shapes，和 panels 一一對應；每一項是 null（直角格）或
+3–8 個頂點的凸多邊形 [[x, y], …]（同樣是頁面內框的比例）。panels 的框必須是這個多邊形的外接矩形——
+出圖、生圖尺寸、MOSS bbox 都照外接矩形走，只有組版與嵌字用多邊形把多出來的部分裁掉。
 """
 import json
 import math
@@ -74,6 +78,16 @@ def _check_templates(templates, label):
             raise LayoutError("%s：模板「%s」要有 panels（一串格子框，至少一個）" % (label, key))
         for i, box in enumerate(panels, 1):
             check_box(box, "%s：模板「%s」第 %d 格" % (label, key, i))
+        if "mood" in tpl and not isinstance(tpl["mood"], str):
+            raise LayoutError("%s：模板「%s」的 mood 要是字串（例如 \"action\"）：%r" % (label, key, tpl["mood"]))
+        shapes = tpl.get("shapes")
+        if shapes is not None:
+            if not isinstance(shapes, list) or len(shapes) != len(panels):
+                raise LayoutError("%s：模板「%s」的 shapes 要和 panels 一樣有 %d 項（直角格寫 null）"
+                                  % (label, key, len(panels)))
+            for i, (box, shape) in enumerate(zip(panels, shapes), 1):
+                if shape is not None:
+                    check_shape(shape, box, "%s：模板「%s」第 %d 格的 shape" % (label, key, i))
 
 
 def validate_pages(data, label=BUILTIN_LABEL):
@@ -166,6 +180,131 @@ def check_box(box, label="位置"):
     if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
         raise LayoutError("%s 要在 0–1 之間，而且左上小於右下：%r" % (label, box))
     return x0, y0, x1, y1
+
+
+SHAPE_TOLERANCE = 0.002     # 外接矩形與 panels 的框允許的誤差（比例）
+
+
+def _signed_area(points):
+    return sum(points[i][0] * points[(i + 1) % len(points)][1] - points[(i + 1) % len(points)][0] * points[i][1]
+               for i in range(len(points))) / 2.0
+
+
+def check_shape(shape, box, label="shape"):
+    """斜格的多邊形：3–8 個 [x, y]（0–1 的比例）、凸多邊形、有面積，外接矩形要等於 panels 的框。
+    回傳 [(x, y), …]（照原本的頂點順序）。"""
+    if not isinstance(shape, (list, tuple)) or not 3 <= len(shape) <= 8:
+        raise LayoutError("%s 要是 3–8 個頂點 [[x, y], …]：%r" % (label, shape))
+    points = []
+    for i, point in enumerate(shape, 1):
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise LayoutError("%s 第 %d 個頂點要是 [x, y]：%r" % (label, i, point))
+        try:
+            x, y = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            raise LayoutError("%s 第 %d 個頂點只能是數字：%r" % (label, i, point))
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise LayoutError("%s 第 %d 個頂點要在 0–1 之間：%r" % (label, i, point))
+        points.append((x, y))
+    if abs(_signed_area(points)) < 1e-4:
+        raise LayoutError("%s 的面積是 0（頂點重疊或排成一直線）：%r" % (label, shape))
+    signs = set()
+    n = len(points)
+    for i in range(n):
+        ax, ay = points[i]
+        bx, by = points[(i + 1) % n]
+        cx, cy = points[(i + 2) % n]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if abs(cross) > 1e-9:
+            signs.add(cross > 0)
+    if len(signs) > 1:
+        raise LayoutError("%s 要是凸多邊形，頂點照順時針或逆時針排（目前有凹角或交叉）：%r" % (label, shape))
+    x0, y0, x1, y1 = check_box(box, label)
+    bound = (min(p[0] for p in points), min(p[1] for p in points), max(p[0] for p in points), max(p[1] for p in points))
+    if any(abs(a - b) > SHAPE_TOLERANCE for a, b in zip(bound, (x0, y0, x1, y1))):
+        raise LayoutError("%s 的外接矩形是 %s，跟 panels 的框 %s 不一致（panels 要寫外接矩形）"
+                          % (label, [round(v, 4) for v in bound], [x0, y0, x1, y1]))
+    return points
+
+
+def template_shapes(tpl):
+    """模板每一格的多邊形（沒有 shapes 或那一格是 null 時給 None）。"""
+    shapes = tpl.get("shapes") or [None] * len(tpl["panels"])
+    return [None if s is None else [tuple(float(v) for v in p) for p in s] for s in shapes]
+
+
+def local_shape(box, shape):
+    """多邊形換成「這一格外接矩形」裡的比例（生成的圖就是這個矩形）。"""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    return [((x - x0) / (x1 - x0), (y - y0) / (y1 - y0)) for x, y in shape]
+
+
+def point_in_polygon(x, y, points):
+    """凸或凹都可以（射線法）；邊上算在裡面。"""
+    inside = False
+    n = len(points)
+    for i in range(n):
+        ax, ay = points[i]
+        bx, by = points[(i + 1) % n]
+        if (ax - x) * (by - y) - (bx - x) * (ay - y) == 0 and min(ax, bx) <= x <= max(ax, bx) and min(ay, by) <= y <= max(ay, by):
+            return True
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            inside = not inside
+    return inside
+
+
+def cut_corners(box, shape, probe=0.06):
+    """斜格被切掉的角（給提示詞與檢查用）：回傳 ["左上", …]。直角格回傳 []。"""
+    if shape is None:
+        return []
+    local = local_shape(box, shape)
+    corners = (("左上", probe, probe), ("右上", 1 - probe, probe), ("左下", probe, 1 - probe), ("右下", 1 - probe, 1 - probe))
+    return [name for name, x, y in corners if not point_in_polygon(x, y, local)]
+
+
+def inset_polygon(points, distances):
+    """把凸多邊形的每一條邊往內推 distances[i]（像素；第 i 條邊是 points[i]→points[i+1]），回傳新頂點。"""
+    n = len(points)
+    ccw = _signed_area(points) > 0             # 影像座標（y 往下）：面積為正＝順時針看起來的那個方向
+    lines = []
+    for i in range(n):
+        (ax, ay), (bx, by) = points[i], points[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy) or 1.0
+        nx, ny = (-dy / length, dx / length) if ccw else (dy / length, -dx / length)   # 指向多邊形內側的法向量
+        d = distances[i]
+        lines.append(((ax + nx * d, ay + ny * d), (dx, dy)))
+    out = []
+    for i in range(n):
+        (p1, d1), (p2, d2) = lines[i - 1], lines[i]
+        det = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(det) < 1e-9:                      # 平行（不會發生在凸多邊形相鄰邊上）：取平移後的點
+            out.append(p2)
+            continue
+        t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / det
+        out.append((p1[0] + d1[0] * t, p1[1] + d1[1] * t))
+    return out
+
+
+def panel_poly_px(page, box, shape):
+    """斜格在整頁上的像素多邊形（已扣掉一半的 gutter：貼著頁面內框的邊不扣，和 panel_rect_px 同規則），
+    與它的外接矩形 (left, top, right, bottom)（四捨五入成整數，組版裁圖用）。"""
+    points = check_shape(shape, box)
+    left, top, right, bottom = inner_rect(page)
+    half = page.get("gutter_px", 0) / 2
+    w, h = right - left, bottom - top
+    eps = 1e-6
+    distances = []
+    for i in range(len(points)):
+        (ax, ay), (bx, by) = points[i], points[(i + 1) % len(points)]
+        on_border = ((ax < eps and bx < eps) or (ax > 1 - eps and bx > 1 - eps)
+                     or (ay < eps and by < eps) or (ay > 1 - eps and by > 1 - eps))
+        distances.append(0.0 if on_border else half)
+    px = [(left + x * w, top + y * h) for x, y in points]
+    poly = inset_polygon(px, distances)
+    rect = (round(min(p[0] for p in poly)), round(min(p[1] for p in poly)),
+            round(max(p[0] for p in poly)), round(max(p[1] for p in poly)))
+    return poly, rect
 
 
 def page_size(page):

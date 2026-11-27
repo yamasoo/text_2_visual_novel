@@ -115,60 +115,232 @@ LETTERING_TYPES: dict[str, Any] = {
 }
 FONT_KEYS = ("dialogue_font", "shout_font", "narration_font", "sfx_font")
 POINT_RANGE = (4.0, 48.0)
+LORA_MODES = ("append", "replace")
+SFX_MODES = ("overlay", "moss")
+PROJECT_STYLE_KEYS = ("comfy_profile", "style_preset", "style", "meta", "look", "sfx_mode")
+
+
+def _parse_project_loras(value: Any) -> list[dict[str, Any]]:
+    """驗證漫畫專案自己的 LoRA 清單：[{name, strength, on}]；略過空白檔名列。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ComicError("loras 要是一串物件（[{name, strength, on}]）")
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise ComicError("loras 第 %d 項要是物件" % i)
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        on = item.get("on", True)
+        if not isinstance(on, bool):
+            raise ComicError("loras 第 %d 項的 on 要是 true／false：%r" % (i, on))
+        raw_strength = item.get("strength", 1.0)
+        if isinstance(raw_strength, bool):
+            raise ComicError("loras 第 %d 項的 strength 要是數字：%r" % (i, raw_strength))
+        try:
+            strength = float(raw_strength)
+        except (TypeError, ValueError) as exc:
+            raise ComicError("loras 第 %d 項的 strength 要是數字：%r" % (i, raw_strength)) from exc
+        out.append({"name": name, "strength": strength, "on": on})
+    return out
+
+
+def _style_presets_info() -> dict[str, dict[str, Any]]:
+    """從 vendor/t2c/data/styles.json 讀畫風預設集（mono / color / american）。"""
+    from vendor.t2c import styles as t2c_styles
+
+    out: dict[str, dict[str, Any]] = {}
+    for key in t2c_styles.names():
+        val = t2c_styles.resolve({"style_preset": key})
+        out[key] = {
+            "name": str(val.get("name") or key),
+            "look": str(val.get("look") or ""),
+            "style": str(val.get("style") or ""),
+            "meta": list(val.get("meta") or []),
+            "gray": bool(val.get("gray", False)),
+        }
+    return out
+
+
+def _read_project_style(book_id: str, project_id: str, config: Config | None = None) -> dict[str, Any]:
+    """讀 project.yaml 裡的畫風與 comfy_profile 設定；檔案不存在就回預設空值。"""
+    import yaml
+
+    path = project_dir(book_id, project_id, config) / "project.yaml"
+    if not path.is_file():
+        return {"comfy_profile": "", "style_preset": "mono", "style": "", "meta": [], "look": "", "sfx_mode": "overlay"}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    meta_raw = raw.get("meta")
+    meta = [str(x).strip() for x in meta_raw if str(x).strip()] if isinstance(meta_raw, list) else []
+    return {
+        "comfy_profile": str(raw.get("comfy_profile") or "").strip(),
+        "style_preset": str(raw.get("style_preset") or "mono").strip(),
+        "style": str(raw.get("style") or "").strip(),
+        "meta": meta,
+        "look": str(raw.get("look") or "").strip(),
+        "sfx_mode": str(raw.get("sfx_mode") or "overlay").strip(),
+    }
+
+
+def _save_project_style(book_id: str, project_id: str, changes: dict[str, Any], config: Config) -> dict[str, Any]:
+    """把畫風與 comfy_profile 變更寫回 project.yaml（留空＝移除覆蓋、回到預設）。"""
+    import yaml
+    from .atomic import write_atomic
+
+    if not isinstance(changes, dict):
+        raise ComicError("project 要是物件")
+    unknown = sorted(set(changes) - set(PROJECT_STYLE_KEYS))
+    if unknown:
+        raise ComicError("不認得的專案設定：%s" % "、".join(unknown))
+    path = project_dir(book_id, project_id, config) / "project.yaml"
+    if not path.is_file():
+        raise ComicError("找不到漫畫專案：%s" % path.parent)
+    config.assert_writable(path)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as error:
+        raise ComicError("讀不到 %s：%s" % (path, error)) from error
+    if not isinstance(raw, dict):
+        raw = {}
+
+    presets = _style_presets_info()
+    if "style_preset" in changes:
+        preset = str(changes["style_preset"] or "").strip() or "mono"
+        if presets and preset not in presets:
+            raise ComicError("不認得的畫風預設集「%s」（可用：%s）" % (preset, "、".join(presets)))
+        raw["style_preset"] = preset
+    if "comfy_profile" in changes:
+        prof = str(changes["comfy_profile"] or "").strip()
+        if prof:
+            raw["comfy_profile"] = prof
+        else:
+            raw.pop("comfy_profile", None)
+    if "sfx_mode" in changes:
+        mode = str(changes["sfx_mode"] or "overlay").strip()
+        if mode not in SFX_MODES:
+            raise ComicError("sfx_mode 只能是 %s（目前是 %r）" % ("、".join(SFX_MODES), mode))
+        raw["sfx_mode"] = mode
+    for key in ("style", "look"):
+        if key in changes:
+            val = str(changes[key] or "").strip()
+            if val:
+                raw[key] = val
+            else:
+                raw.pop(key, None)
+    if "meta" in changes:
+        raw_meta = changes["meta"]
+        if isinstance(raw_meta, str):
+            items = [part.strip() for part in re.split(r"[\n,]+", raw_meta) if part.strip()]
+        elif isinstance(raw_meta, list):
+            items = [str(x).strip() for x in raw_meta if str(x).strip()]
+        else:
+            raise ComicError("meta 要是字串或字串陣列")
+        if items:
+            raw["meta"] = items
+        else:
+            raw.pop("meta", None)
+
+    write_atomic(path, yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
+    return _read_project_style(book_id, project_id, config)
 
 
 def settings_path(book_id: str, project_id: str, config: Config | None = None) -> Path:
-    """漫畫專案自己的設定檔（覆寫 t2c default_config 的 lettering）；只組路徑，不檢查存在。"""
+    """漫畫專案自己的設定檔（覆寫 t2c default_config 的 lettering 與專案專屬 loras）；只組路徑，不檢查存在。"""
     return project_dir(book_id, project_id, config) / SETTINGS_FILE
 
 
 def read_settings(book_id: str, project_id: str, config: Config | None = None) -> dict[str, Any]:
-    """專案設定；檔案不存在＝全部沿用 vendored default。"""
-    path = settings_path(book_id, project_id, config)
-    if not path.is_file():
-        return {"lettering": {}, "problems": []}
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise ComicError("讀不到 %s：%s" % (path, error)) from error
-    lettering = doc.get("lettering") if isinstance(doc, dict) else None
+    """專案設定（lettering、專案專屬 loras、project.yaml 畫風與 comfy_profile）。"""
+    cfg = _config(config)
+    path = settings_path(book_id, project_id, cfg)
+    doc: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                doc = loaded
+        except (OSError, ValueError) as error:
+            raise ComicError("讀不到 %s：%s" % (path, error)) from error
+    lettering = doc.get("lettering")
     kept = dict(lettering) if isinstance(lettering, dict) else {}
-    return {"lettering": kept, "problems": font_problems(kept)}
+    loras = _parse_project_loras(doc.get("loras")) if isinstance(doc.get("loras"), list) else []
+    lora_mode = str(doc.get("lora_mode") or "append").strip()
+    if lora_mode not in LORA_MODES:
+        lora_mode = "append"
+    return {
+        "lettering": kept,
+        "problems": font_problems(kept),
+        "loras": loras,
+        "lora_mode": lora_mode,
+        "project": _read_project_style(book_id, project_id, cfg),
+        "style_presets": _style_presets_info(),
+        "comfy_profiles": list(cfg.comfy_profiles.keys()),
+        "comfy_default_profile": cfg.comfy_default_profile,
+    }
 
 
-def save_settings(book_id: str, project_id: str, lettering: dict[str, Any],
-                  config: Config | None = None) -> dict[str, Any]:
-    """只收 lettering 的已知鍵（先驗型別）；空字串／null＝刪掉該鍵，回到自動尋找。"""
+def save_settings(book_id: str, project_id: str, lettering: dict[str, Any] | None = None,
+                  config: Config | None = None, *, loras: Any = None,
+                  lora_mode: str | None = None, project: dict[str, Any] | None = None) -> dict[str, Any]:
+    """存漫畫專案設定：lettering、專案專屬 loras／lora_mode（寫 settings.json），與 project 畫風／profile（寫 project.yaml）。"""
     config = _config(config)
-    if not isinstance(lettering, dict):
-        raise ComicError("lettering 要是物件")
-    unknown = sorted(set(lettering) - set(LETTERING_TYPES))
-    if unknown:
-        raise ComicError("不認得的設定：%s（可用：%s）" % ("、".join(unknown), "、".join(LETTERING_TYPES)))
-    merged = read_settings(book_id, project_id, config)["lettering"]
-    for key, value in lettering.items():
-        if value is None or value == "":
-            merged.pop(key, None)
-            continue
-        want = LETTERING_TYPES[key]
-        if want is float:
-            low, high = POINT_RANGE
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= float(value) <= high:
-                raise ComicError("%s 要是 %g–%g 的數字：%r" % (key, low, high, value))
-            merged[key] = float(value)
-        elif want is bool:
-            if not isinstance(value, bool):
-                raise ComicError("%s 要是 true／false：%r" % (key, value))
-            merged[key] = value
-        else:
-            if not isinstance(value, str):
-                raise ComicError("%s 要是字串：%r" % (key, value))
-            merged[key] = value.strip()
-    path = settings_path(book_id, project_id, config)
-    config.assert_writable(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"lettering": merged}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return {"lettering": merged, "problems": font_problems(merged)}
+    current = read_settings(book_id, project_id, config)
+    merged_lettering = dict(current["lettering"])
+    if lettering is not None:
+        if not isinstance(lettering, dict):
+            raise ComicError("lettering 要是物件")
+        unknown = sorted(set(lettering) - set(LETTERING_TYPES))
+        if unknown:
+            raise ComicError("不認得的設定：%s（可用：%s）" % ("、".join(unknown), "、".join(LETTERING_TYPES)))
+        for key, value in lettering.items():
+            if value is None or value == "":
+                merged_lettering.pop(key, None)
+                continue
+            want = LETTERING_TYPES[key]
+            if want is float:
+                low, high = POINT_RANGE
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= float(value) <= high:
+                    raise ComicError("%s 要是 %g–%g 的數字：%r" % (key, low, high, value))
+                merged_lettering[key] = float(value)
+            elif want is bool:
+                if not isinstance(value, bool):
+                    raise ComicError("%s 要是 true／false：%r" % (key, value))
+                merged_lettering[key] = value
+            else:
+                if not isinstance(value, str):
+                    raise ComicError("%s 要是字串：%r" % (key, value))
+                merged_lettering[key] = value.strip()
+
+    merged_loras = _parse_project_loras(loras) if loras is not None else list(current["loras"])
+    merged_mode = current["lora_mode"]
+    if lora_mode is not None:
+        mode = str(lora_mode or "append").strip()
+        if mode not in LORA_MODES:
+            raise ComicError("lora_mode 只能是 %s（目前是 %r）" % ("、".join(LORA_MODES), lora_mode))
+        merged_mode = mode
+
+    if project is not None:
+        _save_project_style(book_id, project_id, project, config)
+
+    if lettering is not None or loras is not None or lora_mode is not None:
+        path = settings_path(book_id, project_id, config)
+        config.assert_writable(path)
+        from .atomic import write_atomic
+
+        doc: dict[str, Any] = {"lettering": merged_lettering}
+        if merged_loras or merged_mode != "append":
+            doc["loras"] = merged_loras
+            doc["lora_mode"] = merged_mode
+        write_atomic(path, json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+
+    return read_settings(book_id, project_id, config)
 
 
 def font_problems(lettering: dict[str, Any]) -> list[str]:
@@ -738,6 +910,19 @@ def comic_cfg(config: Config | None = None, overrides: dict[str, Any] | None = N
         comfy["profiles"] = merged
         if config.comfy_default_profile:
             comfy["default_profile"] = config.comfy_default_profile
+    # 專案專屬 LoRA（settings.json）：疊加在全域 profile.loras 後面，或 replace 整組取代
+    proj_loras = (overrides or {}).get("loras") if isinstance((overrides or {}).get("loras"), list) else None
+    lora_mode = str((overrides or {}).get("lora_mode") or "append").strip()
+    if proj_loras is not None and (proj_loras or lora_mode == "replace"):
+        profiles = comfy.get("profiles")
+        if isinstance(profiles, dict):
+            for prof in profiles.values():
+                if not isinstance(prof, dict):
+                    continue
+                if lora_mode == "replace":
+                    prof["loras"] = list(proj_loras)
+                else:
+                    prof["loras"] = list(prof.get("loras") or []) + list(proj_loras)
     lettering = cfg.setdefault("lettering", {})
     for key, value in ((overrides or {}).get("lettering") or {}).items():
         if key in LETTERING_TYPES:
@@ -847,8 +1032,20 @@ def run_stages(book_id: str, project_id: str, chapters: list[int], stages: list[
         chat, chat_json = make_chat(config, executor, on_usage=on_usage)
     adapter = adapt.Adapter(project, prov_for=lambda key: {"id": str(key)}, should_stop=should_stop,
                             on_event=on_event, on_delta=on_delta, chat=chat, chat_json=chat_json)
+    stage_output = {
+        "annotate": project.scenes_path,
+        "plan": project.plan_path,
+        "script": project.script_path,
+        "storyboard": project.storyboard_path,
+    }
+    skipped_stages: list[dict[str, Any]] = []
     for stage in picked:
         for number in numbers:
+            if not force and len(picked) > 1 and stage_output[stage](number).is_file():
+                skipped_stages.append({"stage": stage, "chapter": number})
+                if on_stage is not None:
+                    on_stage(stage, number, "已完成（跳過）")
+                continue
             if stage == "annotate":
                 _, report = adapter.run_annotate(number, "", force)
                 note = "段落 %d／%d" % (report["paragraphs_used"], report["paragraphs"])
@@ -863,8 +1060,8 @@ def run_stages(book_id: str, project_id: str, chapters: list[int], stages: list[
                 note = "%d 頁" % len(board["pages"])
             if on_stage is not None:
                 on_stage(stage, number, note)
-    return {"stages": picked, "chapters": numbers, "warnings": list(adapter.warnings[:20]),
-            "usage": dict(adapter.usage), "project": str(project.root)}
+    return {"stages": picked, "chapters": numbers, "skipped": skipped_stages,
+            "warnings": list(adapter.warnings[:20]), "usage": dict(adapter.usage), "project": str(project.root)}
 
 
 def comic_job(fe: Any, book_id: str, project_id: str, chapters: list[int], stages: list[str], *,
@@ -937,7 +1134,7 @@ def render_chapter(book_id: str, project_id: str, number: int, *, preset: str | 
     from vendor.t2c import render
 
     project = open_project(book_id, project_id, config)
-    cfg = comic_cfg(config)
+    cfg = comic_cfg(config, read_settings(book_id, project_id, config))
     try:
         jobs = render.chapter_jobs(project, number, page=page, panel=panel, candidates=candidates)
         written = render.render_jobs(project, number, jobs, cfg, preset_name=preset, force=force,
@@ -964,7 +1161,7 @@ def render_more(book_id: str, project_id: str, number: int, *, page: int | None 
     if count < 1:
         raise ComicError("加畫張數要大於 0（收到 %r）" % (more,))
     project = open_project(book_id, project_id, config)
-    cfg = comic_cfg(config)
+    cfg = comic_cfg(config, read_settings(book_id, project_id, config))
     try:
         jobs = render.chapter_jobs(project, number, page=page, panel=panel)
         profile = render.resolve_profile(cfg, project, None)
@@ -1214,13 +1411,15 @@ def export_meta(project, number: int) -> dict[str, Any]:
 
 def export_file(book_id: str, project_id: str, number: int, kind: str,
                 config: Config | None = None) -> Path:
-    """出 PDF 或 CBZ（t2c/export.py），回傳檔案路徑。"""
+    """出 PDF、CBZ（t2c/export.py）或純單頁 PNG 壓縮檔（zip），回傳檔案路徑。"""
+    import os
+    import zipfile
     from vendor.t2c import compose as t2c_compose
     from vendor.t2c import export as t2c_export
 
     kind = str(kind or "").strip().lower()
-    if kind not in ("pdf", "cbz"):
-        raise ComicError("kind 只能是 pdf 或 cbz：%r" % (kind,))
+    if kind not in ("pdf", "cbz", "zip"):
+        raise ComicError("kind 只能是 pdf、cbz 或 zip：%r" % (kind,))
     project = open_project(book_id, project_id, config)
     folder = t2c_compose.pages_dir(project, number)
     files = sorted(folder.glob("*.png")) if folder.is_dir() else []
@@ -1229,6 +1428,14 @@ def export_file(book_id: str, project_id: str, number: int, kind: str,
     out_dir = project.out_dir("out")
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = "%s_ch%03d" % (project_id, int(number))
+    if kind == "zip":
+        target = out_dir / (stem + "_png.zip")
+        tmp = out_dir / (stem + "_png.zip.tmp")
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_STORED) as archive:
+            for path in files:
+                archive.write(path, arcname=path.name)
+        os.replace(tmp, target)
+        return target
     meta = export_meta(project, number)
     if kind == "pdf":
         return Path(_call(t2c_export.build_pdf, files, out_dir / (stem + ".pdf"), meta))

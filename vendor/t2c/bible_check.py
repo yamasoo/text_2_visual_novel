@@ -18,6 +18,13 @@ from .script import Issue
 
 FEMALE = {"woman", "girl", "female", "lady"}
 MALE = {"man", "boy", "male", "guy"}
+# 非人形角色（龍、動物、魔物、機械等，或 Danbooru 標籤 1other）：不強求人類性別／年齡／頭髮／服裝
+NONHUMAN = {
+    "1other", "nonhuman", "non-human", "creature", "monster", "beast", "animal",
+    "dragon", "wyvern", "cat", "dog", "wolf", "fox", "bird", "owl", "crow", "horse",
+    "rabbit", "bear", "snake", "slime", "golem", "spirit", "fairy", "ghost",
+    "robot", "android", "mecha", "drone", "automaton", "puppet",
+}
 
 # look_en 不准出現的詞。三組分開列，錯誤訊息才能告訴模型「該搬去哪裡」。
 CLOTHING_WORDS = (
@@ -43,6 +50,14 @@ AGE = re.compile(
     r"in (?:his|her|their) (?:early |mid-?|late )?(?:teens|twenties|thirties|forties|fifties|sixties|seventies|eighties))\b", re.I)
 HAIR = re.compile(r"\b(hair|haired|bald|shaved|buzz|buzzcut|ponytail|bun|braid|braids|bangs|fringe|crew cut|mohawk)\b", re.I)
 OUTFIT_START = re.compile(r"^(He|She|They)\s+(wears?|is wearing|are wearing)\b")
+# 服裝的顏色或深淺（V1g）：沒寫的話每個 seed 自己決定，同一套衣服會忽深忽淺（V1 第二輪回報）
+COLOR = re.compile(
+    r"\b(black|white|gr[ae]y|silver|charcoal|slate|navy|blue|cobalt|indigo|teal|cyan|turquoise|green|olive|khaki|emerald|"
+    r"red|crimson|scarlet|maroon|burgundy|wine|pink|rose|purple|violet|lavender|orange|rust|yellow|mustard|gold|golden|"
+    r"brown|tan|beige|camel|cream|ivory|ochre|sand|copper|bronze|"
+    r"dark|light|pale|deep|bright|faded|muted|pastel|neon|off-white|"
+    r"(?:black|white|gr[ae]y|red|blue|green)ish|monochrome|colou?red)\b", re.I)
+COLOR_EXAMPLE = "a dark navy wool coat、light gray work trousers"
 
 MIN_LOOK_WORDS = 6
 WARN_LOOK_WORDS = 60
@@ -61,6 +76,12 @@ def _hits(text, vocabulary):
         if w in vocab and w not in seen:
             seen.append(w)
     return seen
+
+
+def is_nonhuman(look_en):
+    """含 1other／dragon／creature／animal／robot 等非人關鍵字時回傳 True。"""
+    found = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", str(look_en or "").lower()))
+    return bool(found & NONHUMAN)
 
 
 def gender(look_en):
@@ -100,12 +121,14 @@ def check_character_look(look_en, label):
         if found:
             issues.append(Issue("error", label, "look_en 裡的「%s」是%s，不是固定外觀；請刪掉（%s）。look_en 只寫年齡、性別、髮型髮色、眼睛與臉部特徵、體型，永久的特徵（疤、痣、眼鏡）可以寫"
                                 % ("、".join(found), what, "要寫進 %s" % where_to if where_to != "outfits" else "服裝請寫進 outfits")))
-    if gender(look_en) is None:
-        issues.append(Issue("error", label, "look_en 要明確寫出性別（woman／man／girl／boy 其中一個）：編譯時依它決定多角色左右句的 She／He"))
-    if not AGE.search(look_en):
-        issues.append(Issue("error", label, "look_en 缺少年齡（例如 a 19-year-old、a middle-aged、an elderly）"))
-    if not HAIR.search(look_en):
-        issues.append(Issue("warn", label, "look_en 沒有提到頭髮（髮型、髮色，或 bald）；髮型是辨識角色最重要的線索"))
+    nonhuman = is_nonhuman(look_en)
+    if not nonhuman:
+        if gender(look_en) is None:
+            issues.append(Issue("error", label, "look_en 要明確寫出性別（woman／man／girl／boy 其中一個，非人形可寫 1other／dragon 等）：編譯時依它決定多角色左右句的 She／He"))
+        if not AGE.search(look_en):
+            issues.append(Issue("error", label, "look_en 缺少年齡（例如 a 19-year-old、a middle-aged、an elderly）"))
+        if not HAIR.search(look_en):
+            issues.append(Issue("warn", label, "look_en 沒有提到頭髮（髮型、髮色，或 bald）；髮型是辨識角色最重要的線索"))
     return issues
 
 
@@ -135,12 +158,14 @@ def check_sections(card, label):
         issues.append(Issue("error", label, "整張卡的外觀只有 %d 個字，太短：至少要有年齡、性別、髮型髮色、眼睛或臉部特徵、體型" % n))
     elif n > WARN_LOOK_WORDS:
         issues.append(Issue("warn", label, "整張卡的外觀有 %d 個字，偏長；越長越容易互相打架，建議 %d 字內" % (n, WARN_LOOK_WORDS)))
-    if gender(text) is None:
-        issues.append(Issue("error", label, "sections 要明確寫出性別（woman／man／girl／boy 其中一個，通常放 head）：編譯時依它決定多角色時左右句的 She／He"))
-    if not AGE.search(text):
-        issues.append(Issue("error", label, "sections 缺少年齡（例如 a 19-year-old、an elderly；通常放 head）"))
-    if not HAIR.search(" ".join(parts.get("head", ()))):
-        issues.append(Issue("warn", _where(label, "sections.head"), "沒有提到頭髮（髮型、髮色，或 bald）；髮型是辨識角色最重要的線索"))
+    nonhuman = is_nonhuman(text)
+    if not nonhuman:
+        if gender(text) is None:
+            issues.append(Issue("error", label, "sections 要明確寫出性別（woman／man／girl／boy 其中一個，非人形可寫 1other／dragon 等，通常放 head）：編譯時依它決定多角色時左右句的 She／He"))
+        if not AGE.search(text):
+            issues.append(Issue("error", label, "sections 缺少年齡（例如 a 19-year-old、an elderly；通常放 head）"))
+        if not HAIR.search(" ".join(parts.get("head", ()))):
+            issues.append(Issue("warn", _where(label, "sections.head"), "沒有提到頭髮（髮型、髮色，或 bald）；髮型是辨識角色最重要的線索"))
     return issues
 
 
@@ -165,6 +190,11 @@ def check_outfit_parts(parts, label, oid):
                 issues.append(Issue("error", _where(where, name), "「%s」是表情或動作，不屬於服裝；只寫穿什麼（顏色、款式、配件）" % "、".join(found)))
     if not total:
         issues.append(Issue("error", where, "至少要有一項：top（上著）、bottom（下著）或 set（一整套的名稱）"))
+    plain = [item for name in look.OUTFIT_PARTS for item in look._phrases(parts.get(name))
+             if not CJK.search(item) and not COLOR.search(item)]
+    if plain:
+        issues.append(Issue("warn", where, "%s 沒寫顏色或深淺：出圖時每張會自己決定，同一套衣服會忽深忽淺。請寫明，例如 %s（黑白畫風也要寫 dark／light）"
+                            % ("、".join("「%s」" % p[:30] for p in plain), COLOR_EXAMPLE)))
     return issues
 
 
@@ -198,6 +228,9 @@ def check_outfits(outfits, look_en, label):
         found = _hits(sentence, OUTFIT_FORBIDDEN)
         if found:
             issues.append(Issue("error", where, "「%s」是表情或動作，不屬於服裝；服裝句只寫穿什麼（顏色、款式、配件）" % "、".join(found)))
+        if not COLOR.search(sentence):
+            issues.append(Issue("warn", where, "整句沒寫顏色或深淺：出圖時每張會自己決定，同一套衣服會忽深忽淺。請寫明，例如 %s（黑白畫風也要寫 dark／light）"
+                                % COLOR_EXAMPLE))
     return issues
 
 
@@ -235,7 +268,9 @@ def check_card(card, kind="character", label=None):
             issues += check_sections(card, label)
         else:
             issues += check_character_look(card.get("look_en"), label)
-        issues += check_outfits(card.get("outfits"), look.look_en(card), label)
+        look_text = look.look_en(card)
+        if not (is_nonhuman(look_text) and not card.get("outfits")):
+            issues += check_outfits(card.get("outfits"), look_text, label)
         notes = card.get("outfit_notes")
         if notes is not None:
             if not isinstance(notes, dict):

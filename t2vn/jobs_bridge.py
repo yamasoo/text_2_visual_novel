@@ -36,18 +36,37 @@ PHASE_TEXT = {
 ITEM_STATE = {"pending": "pending", "running": "running", "done": "done",
               "skipped": "skipped", "error": "error", "stopped": "stopped"}
 
+MAX_FINISHED_META = 30
+
 
 class Jobs:
     """一本書同時一個任務；任務本身是 fekit 的 ``Job``。
 
     ``self.meta`` 依任務 id 記住 t2vn 自己的東西（書、章節、執行者、權杖數、
     紀錄用的狀態與時間、進度游標），不掛在 fekit 的物件上。
+    已結束的任務在記憶體中最多保留最近 ``max_finished`` 筆（預設 30），
+    執行中的永遠保留；完整紀錄仍留在磁碟上的 ``_jobs/*.json``。
     """
 
-    def __init__(self, runner: JobRunner) -> None:
+    def __init__(self, runner: JobRunner, max_finished: int = MAX_FINISHED_META) -> None:
         self.runner = runner
+        self.max_finished = max(0, int(max_finished))
         self.meta: dict[str, dict[str, Any]] = {}
         self.lock = threading.Lock()
+
+    def _prune_meta(self) -> None:
+        """回收已結束的舊任務 meta，只保留最近 ``max_finished`` 筆；執行中的一律不動。"""
+        with self.lock:
+            finished = [
+                (meta["ended"], meta["started"], job_id)
+                for job_id, meta in self.meta.items()
+                if meta.get("ended") is not None
+            ]
+            if len(finished) <= self.max_finished:
+                return
+            finished.sort(reverse=True)
+            for _, _, job_id in finished[self.max_finished :]:
+                self.meta.pop(job_id, None)
 
     # ---- 查詢
     def latest_for(self, book_id: str) -> Any | None:
@@ -237,6 +256,7 @@ class Jobs:
                 on_finish(fe)
             except Exception as exc:  # noqa: BLE001 — 存不了紀錄不能讓任務狀態壞掉
                 fe.say("could not save job record: %s" % exc, "warn")
+        self._prune_meta()
 
     def record(self, fe: Any) -> dict[str, Any]:
         """任務紀錄：從 fekit 的 ``patch(0)`` 組出來（§8.1-4）。"""

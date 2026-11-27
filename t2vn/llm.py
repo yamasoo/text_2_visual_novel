@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from .errors import JobStopped, T2vnError
 
-THINKING_VALUES = ("off", "low", "high", "max")
+THINKING_VALUES = ("off", "low", "medium", "high", "max")
 # novel-studio 的 reasoning 設定用「階段」名稱；這裡固定用一個階段名對應 thinking 設定。
 _STAGE = "structured"
 
@@ -78,7 +78,7 @@ def make_llm(provider: str, model: str, thinking: str = "off", max_output: int =
         raise LlmError(f"llm.thinking must be one of {THINKING_VALUES}, got {thinking!r}")
     base = next((dict(p) for p in providers.DEFAULT_PROVIDERS if p["id"] == provider), None)
     if base is None:
-        raise LlmError(f"unknown llm provider {provider!r}; known: deepseek, llamacpp")
+        raise LlmError(f"unknown llm provider {provider!r}; known: deepseek, llamacpp, gemini")
     base["model"] = model
     base["max_output"] = int(max_output)
     base["temperature"] = temperature  # 標註是結構化工作，用低溫；思考模式下 DeepSeek 會忽略
@@ -177,6 +177,8 @@ def key_status(provider: str, secrets_home: str | Path | None = None) -> tuple[b
         return True, "secrets file"
     if os.environ.get(base["key_env"]):
         return True, f"environment variable {base['key_env']}"
+    if providers._load_dotenv(str(home)).get(base["key_env"]):
+        return True, f".env ({base['key_env']})"
     return False, ""
 
 

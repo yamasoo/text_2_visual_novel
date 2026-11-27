@@ -35,6 +35,13 @@ APPEARANCE = [
 ]
 WEAR = re.compile(r"\b(wears?|wearing|dressed in)\b", re.I)
 CLOTHES_WORD = re.compile(r"\b(%s)\b" % CLOTHES, re.I)
+# 畫面裡要畫出的字（V1f-1，分鏡規則 13）：生圖模型會照字面畫字而且常拼錯（V1 實測：「Intake Pressure -0.4」「BEUGENIS LAW」）
+READABLE_TEXT = [
+    re.compile(r"[\"\u201c\u300c][^\"\u201d\u300d]{2,}[\"\u201d\u300d]"),                     # 引號裡的字
+    re.compile(r"\b(reads|reading out|says|saying|labell?ed|titled|inscribed|spelling out|with the (words?|text|title))\b", re.I),
+    re.compile(r"(?<![\w.])[-\u2212]?\d+(\.\d+)?\s*(%|percent\b)|\bpercent\b|\d+\.\d+|\b(minus|plus) \d|\b(readouts?|digits)\b", re.I),   # 讀數
+    re.compile(r"\b(titles?|headlines?|slogans?|lettering|words|text)\b", re.I),                       # 標題、標語、字
+]
 
 PANEL_KEYS = {"slot", "id", "shot", "angle", "location", "scene", "characters", "objects", "sfx", "bubbles", "seeds"}
 CHAR_KEYS = {"id", "outfit", "pose", "expression", "box", "extra"}   # extra：臨時角色旗標（D9）
@@ -90,6 +97,16 @@ def _appearance(value, label, where, issues):
         issues.append(Issue("warn", where, "%s 提到衣物「%s」：衣著由聖經的 outfits 提供；如果是動作的對象（脫下外套、拉上拉鍊）可以不管，如果是在描述穿著請拿掉" % (label, m.group(0))))
 
 
+def _readable_text(value, label, where, issues):
+    """scene／objects.caption 寫了要畫出來的字 → warn（不擋存檔）：請改寫成「顯示什麼樣的東西」。"""
+    if not isinstance(value, str):
+        return
+    hits = [m for pattern in READABLE_TEXT for m in [pattern.search(value)] if m]
+    if hits:
+        m = min(hits, key=lambda h: h.start())
+        issues.append(Issue("warn", where, "%s 的「%s」像是要畫出來的字或讀數：生圖會照字面畫字而且常拼錯。請只寫顯示什麼樣的東西（例如 a screen showing a gauge dropping into the red zone），讀數與標語交給對話框或旁白（規則 13）" % (label, m.group(0).strip())))
+
+
 def column_issues(text, kind, where):
     """直排台詞每欄字數：一整句超過上限、又沒有 \\n 時，嵌字的自動斷欄沒有中文斷詞，會把詞拆開。"""
     limit = COLUMN_CHARS_NARRATION if kind == "narration" else COLUMN_CHARS
@@ -130,6 +147,7 @@ def check_panel(project, page_no, panel):
         issues.append(Issue("error", where, "地點「%s」不在 bible/locations（現有：%s）；沒有合適的地點就省略 location" % (loc, "、".join(project.locations) or "無")))
     _english(panel.get("scene"), "scene", where, issues)
     _appearance(panel.get("scene"), "scene", where, issues)
+    _readable_text(panel.get("scene"), "scene", where, issues)
 
     chars = panel.get("characters", [])
     cast_ids, boxes = [], []
@@ -193,6 +211,7 @@ def check_panel(project, page_no, panel):
             issues.append(Issue("error", where, "objects 的每一項要是 {caption: 英文, box: [x0,y0,x1,y1]}"))
             continue
         _english(obj["caption"], "objects.caption", where, issues)
+        _readable_text(obj["caption"], "objects.caption", where, issues)
         _box(obj["box"], "物件的 box", where, issues)
 
     sfx = panel.get("sfx", [])
@@ -289,8 +308,31 @@ def check_page_panels(project, page_no, template_key, panels, pages_data):
     got = [p.get("slot") if isinstance(p, dict) else None for p in panels]
     if got != want:
         issues.append(Issue("error", "第 %s 頁" % page_no, "模板「%s」有 %d 格，panels 的 slot 要依序是 %s，目前是 %s" % (template_key, len(want), want, got)))
+    shapes = layout.template_shapes(tpl)
     for panel in panels:
         issues += check_panel(project, page_no, panel)
+        slot = panel.get("slot") if isinstance(panel, dict) else None
+        if isinstance(slot, int) and 1 <= slot <= len(shapes) and shapes[slot - 1] is not None:
+            issues += cut_corner_issues(panel, tpl["panels"][slot - 1], shapes[slot - 1], _where(page_no, slot))
+    return issues
+
+
+def cut_corner_issues(panel, box, shape, where):
+    """斜格（V3）：角色的臉（框的上 1/4 中央）落在被切掉的角裡 → 提醒（出圖照外接矩形畫，組版時那一角會被裁掉）。"""
+    local = layout.local_shape(box, shape)
+    issues = []
+    for entry in panel.get("characters") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("box"), (list, tuple)) or len(entry["box"]) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = (float(v) for v in entry["box"])
+        except (TypeError, ValueError):
+            continue
+        face = ((x0 + x1) / 2, y0 + (y1 - y0) / 8)
+        if not layout.point_in_polygon(face[0], face[1], local):
+            corners = "、".join(layout.cut_corners(box, shape)) or "斜邊外"
+            issues.append(Issue("warn", where, "角色「%s」的臉落在斜格被切掉的地方（%s角），組版時會被裁掉；請把角色框移進格子裡"
+                                % (entry.get("id"), corners)))
     return issues
 
 
