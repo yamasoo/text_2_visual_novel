@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "letters.schema.json",
+  "title": "Lettering overrides (works/<book_id>/comic/<project_id>/letters/chNNN.json)",
+  "description": "Format version 1 (vendor/t2c LETTERS_VERSION). Written by t2vn; t2c letter.check_letters() is the final check. See docs/05_資料格式規格.md 5.11.1.",
+  "type": "object",
+  "required": ["version", "panels"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "chapter": { "type": "integer", "minimum": 1, "maximum": 999 },
+    "panels": {
+      "type": "object",
+      "propertyNames": { "pattern": "^p[0-9]{3}_k[0-9]+$" },
+      "additionalProperties": { "$ref": "#/$defs/panel" }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 }
+      ],
+      "minItems": 2,
+      "maxItems": 2,
+      "items": false
+    },
+    "box": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 }
+      ],
+      "minItems": 4,
+      "maxItems": 4,
+      "items": false
+    },
+    "bubble": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": { "^_": true },
+      "properties": {
+        "text": { "type": "string" },
+        "center": { "$ref": "#/$defs/point" },
+        "tail": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point" }] },
+        "scale": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 40 }
+      }
+    },
+    "sfx": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": { "^_": true },
+      "properties": {
+        "box": { "$ref": "#/$defs/box" },
+        "angle": { "type": "number", "minimum": -45, "maximum": 45 },
+        "vertical": { "type": "boolean" }
+      }
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": { "^_": true },
+      "properties": {
+        "faces": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "items": { "$ref": "#/$defs/box" } }
+          ]
+        },
+        "bubbles": {
+          "type": "array",
+          "items": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/bubble" }] }
+        },
+        "sfx": {
+          "type": "array",
+          "items": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sfx" }] }
+        }
+      }
+    }
+  }
+}

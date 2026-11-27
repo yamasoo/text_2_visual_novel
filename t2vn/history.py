@@ -16,7 +16,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
+from .atomic import write_atomic
+
 HISTORY_DIR_NAME = "_history"
+DEFAULT_MAX_HISTORY = 30
 STAMP_FORMAT = "%Y%m%d%H%M%S"
 STAMP_PATTERN = re.compile(r"^[0-9]{14}$")
 UTF8 = "utf-8"
@@ -91,7 +94,7 @@ def _write_backup(target: Path, text: str, now: datetime | None) -> HistoryEntry
         stamp = moment.strftime(STAMP_FORMAT)
         path = folder / _entry_name(target, stamp)
         if not path.exists():
-            path.write_text(text, encoding=UTF8)
+            write_atomic(path, text, encoding=UTF8)
             return {"name": path.name, "stamp": stamp, "size": path.stat().st_size}
         moment = moment + timedelta(seconds=1)
 
@@ -124,8 +127,7 @@ def restore_history(
             raise ValueError(f"讀不到目前的檔案 {target}：{exc}") from exc
         saved = _write_backup(target, current, now)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding=UTF8)
+    write_atomic(target, content, encoding=UTF8)
     return saved
 
 

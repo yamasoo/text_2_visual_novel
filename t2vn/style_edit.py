@@ -192,5 +192,6 @@ def save_style(path: Path, doc: dict[str, Any]) -> None:
     errors = validate_style(doc)
     if errors:
         raise ValueError("; ".join(errors))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_dump(doc), encoding=UTF8)
+    from .atomic import write_atomic
+
+    write_atomic(path, _dump(doc), encoding=UTF8)

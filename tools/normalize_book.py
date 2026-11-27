@@ -57,6 +57,7 @@ class _Rules:
     file_pattern: Pattern[str]
     scene_break_pattern: Pattern[str]
     txt_chapter_heading: str
+    allow_plain_heading: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,8 +98,8 @@ def _compile(
     return compiled
 
 
-def _load_field_map(field_map_path: str | Path) -> _Rules:
-    """讀取並驗證欄位對照檔，回傳本模組需要的規則。"""
+def _load_field_map(field_map_path: str | Path, book_root: Path | None = None) -> _Rules:
+    """讀取並驗證欄位對照檔，回傳本模組需要的規則（有 ``book_root`` 時自動偵測 v3／v2）。"""
     path = Path(field_map_path)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -117,6 +118,19 @@ def _load_field_map(field_map_path: str | Path) -> _Rules:
     if not isinstance(source_paths, dict):
         raise NormalizeError(f"欄位對照檔 {path} 缺少物件欄位 'source_paths'")
     chapter_text_dir = _require_str(source_paths, "chapter_text_dir", path)
+    file_pattern_key = "chapter_text_file_pattern"
+    allow_plain_heading = False
+
+    v3_paths = data.get("v3_source_paths")
+    if book_root is not None and isinstance(v3_paths, dict):
+        v3_text = v3_paths.get("chapter_text_dir")
+        if (book_root / "book.json").is_file() or (
+            isinstance(v3_text, str) and v3_text.strip() and (book_root / v3_text).is_dir()
+        ):
+            chapter_text_dir = _require_str(v3_paths, "chapter_text_dir", path)
+            if isinstance(data.get("v3_chapter_text_file_pattern"), str):
+                file_pattern_key = "v3_chapter_text_file_pattern"
+            allow_plain_heading = True
 
     title_pattern = _compile(
         _require_str(data, "chapter_text_title_pattern", path),
@@ -125,8 +139,8 @@ def _load_field_map(field_map_path: str | Path) -> _Rules:
         min_groups=2,
     )
     file_pattern = _compile(
-        _require_str(data, "chapter_text_file_pattern", path),
-        "chapter_text_file_pattern",
+        _require_str(data, file_pattern_key, path),
+        file_pattern_key,
         path,
         min_groups=2,
     )
@@ -148,6 +162,7 @@ def _load_field_map(field_map_path: str | Path) -> _Rules:
         file_pattern=file_pattern,
         scene_break_pattern=scene_break_pattern,
         txt_chapter_heading=txt_chapter_heading,
+        allow_plain_heading=allow_plain_heading,
     )
 
 
@@ -299,19 +314,21 @@ def _parse_chapter(
 
     heading_line = lines[heading_index].strip()
     heading_match = rules.title_pattern.match(heading_line)
-    if heading_match is None:
+    if heading_match is not None:
+        heading_no = _group_int(heading_match, 1, source.rel_path)
+        if heading_no != source.chapter_no:
+            raise NormalizeError(
+                f"章節檔 {source.rel_path} 的標題章號 {heading_no} "
+                f"與檔名章號 {source.chapter_no} 不一致"
+            )
+        title = _group(heading_match, 2).strip() or source.file_title
+    elif rules.allow_plain_heading and heading_line.startswith("# "):
+        title = heading_line[2:].strip() or source.file_title
+    else:
         raise NormalizeError(
             f"章節檔 {source.rel_path} 的第一個非空行不是章標題"
             f"（需符合 {rules.title_pattern.pattern!r}）：{heading_line!r}"
         )
-
-    heading_no = _group_int(heading_match, 1, source.rel_path)
-    if heading_no != source.chapter_no:
-        raise NormalizeError(
-            f"章節檔 {source.rel_path} 的標題章號 {heading_no} "
-            f"與檔名章號 {source.chapter_no} 不一致"
-        )
-    title = _group(heading_match, 2).strip() or source.file_title
 
     paragraphs: list[dict[str, Any]] = []
     scene_breaks: list[int] = []
@@ -399,10 +416,9 @@ def normalize_book(
         NormalizeError: 任何可預期的錯誤（參數、檔案、格式）。
     """
     _validate_book_id(book_id)
-    rules = _load_field_map(field_map_path)
-    chapter_range = _check_chapters(chapters)
-
     book_root = Path(book_dir).resolve()
+    rules = _load_field_map(field_map_path, book_root=book_root)
+    chapter_range = _check_chapters(chapters)
     out_root = Path(out_dir).resolve()
     if out_root == book_root or book_root in out_root.parents:
         raise NormalizeError(

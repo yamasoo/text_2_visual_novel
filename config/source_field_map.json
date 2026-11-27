@@ -5,52 +5,121 @@
     "chapter_text_dir": "正文",
     "chapter_outline_dir": "大綱/章綱",
     "character_dir": "設定/角色",
+    "world_dir": "設定/世界觀",
+    "visual_card_dir": "bible/visual-cards",
     "glossary_file": "設定/名詞表.md",
     "chapter_summary_dir": "追蹤/章節摘要"
   },
+  "v3_source_paths": {
+    "chapter_text_dir": "manuscript",
+    "chapter_outline_dir": "outline/chapters",
+    "character_dir": "bible/characters",
+    "world_dir": "bible/world",
+    "visual_card_dir": "bible/visual-cards",
+    "glossary_file": "bible/glossary.md",
+    "chapter_summary_dir": "tracking/summaries"
+  },
   "chapter_outline": {
     "類型": "doc_type",
+    "type": "doc_type",
     "章號": "chapter_no",
+    "chapter": "chapter_no",
     "章名": "chapter_title",
+    "title": "chapter_title",
     "所屬卷": "volume_title",
+    "volume": "volume_title",
     "所屬單元": "arc_title",
+    "unit": "arc_title",
     "字數目標": "word_target",
-    "狀態": "status"
+    "target_length": "word_target",
+    "狀態": "status",
+    "status": "status",
+    "結構": "structure",
+    "structure": "structure",
+    "標籤": "tags",
+    "tags": "tags",
+    "來源": "source",
+    "source": "source"
   },
   "character_card": {
     "類型": "doc_type",
+    "type": "doc_type",
     "名稱": "name",
+    "name": "name",
     "別名": "aliases",
+    "aliases": "aliases",
     "定位": "role",
+    "role": "role",
     "首次登場": "first_appearance",
-    "狀態": "status"
+    "first_appearance": "first_appearance",
+    "最後登場": "last_appearance",
+    "last_appearance": "last_appearance",
+    "相關角色": "related_characters",
+    "related_characters": "related_characters",
+    "狀態": "status",
+    "status": "status",
+    "分類": "category",
+    "category": "category",
+    "標籤": "tags",
+    "tags": "tags",
+    "來源": "source",
+    "source": "source",
+    "更新至": "updated_through",
+    "updated_through": "updated_through"
   },
   "chapter_summary": {
     "類型": "doc_type",
+    "type": "doc_type",
     "章號": "chapter_no",
+    "chapter": "chapter_no",
     "章名": "chapter_title",
-    "字數": "word_count"
+    "title": "chapter_title",
+    "字數": "word_count",
+    "length": "word_count"
   },
   "glossary_doc": {
-    "類型": "doc_type"
+    "類型": "doc_type",
+    "type": "doc_type",
+    "更新至": "updated_through",
+    "updated_through": "updated_through",
+    "狀態": "status",
+    "status": "status"
   },
   "doc_type_values": {
     "章綱": "chapter_outline",
+    "chapter-card": "chapter_outline",
     "角色": "character_card",
+    "character": "character_card",
     "章節摘要": "chapter_summary",
-    "名詞表": "glossary"
+    "chapter-summary": "chapter_summary",
+    "名詞表": "glossary",
+    "glossary": "glossary"
   },
   "status_values": {
     "已寫": "written",
+    "written": "written",
     "已確認": "confirmed",
-    "正式": "official"
+    "approved": "confirmed",
+    "confirmed": "confirmed",
+    "正式": "official",
+    "canon": "official",
+    "草稿": "draft",
+    "draft": "draft",
+    "待填": "stub",
+    "stub": "stub"
   },
   "role_values": {
     "主角": "protagonist",
+    "protagonist": "protagonist",
     "主要配角": "main",
+    "main-supporting": "main",
+    "main": "main",
     "配角": "supporting",
+    "supporting": "supporting",
     "反派": "antagonist",
-    "路人": "minor"
+    "antagonist": "antagonist",
+    "路人": "minor",
+    "minor": "minor"
   },
   "outline_sections": {
     "本章四問": "four_questions",
@@ -69,6 +138,7 @@
     "說話方式（聲音卡）": "voice",
     "關係": "relations",
     "角色弧線": "arc",
+    "繪圖提示": "art_prompt",
     "備註": "notes"
   },
   "glossary_columns": {
@@ -95,8 +165,10 @@
   },
   "chapter_text_title_pattern": "^#\\s*第([0-9]+)章\\s*(.*)$",
   "chapter_text_file_pattern": "^第([0-9]+)章(?:_(.+))?\\.md$",
+  "v3_chapter_text_file_pattern": "^ch-([0-9]+)(?:_(.+))?\\.md$",
   "chapter_outline_file_pattern": "^第([0-9]+)章\\.md$",
-  "first_appearance_pattern": "^(?:第[0-9]+卷)?第([0-9]+)章",
+  "v3_chapter_outline_file_pattern": "^ch-([0-9]+)\\.md$",
+  "first_appearance_pattern": "^(?:(?:第[0-9]+卷)?第)?([0-9]+)章?",
   "glossary_first_appearance_pattern": "首次出現：第([0-9]+)章",
   "scene_break_pattern": "^([*＊\\-—◇◆·・]\\s*){3,}$",
   "txt_chapter_heading": "第{chapter_no}章"

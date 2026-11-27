@@ -1,0 +1,107 @@
+{
+  "_說明": "複製成 config.json 再改（config.json 不進版控）。金鑰不寫在這裡：DeepSeek 用環境變數 DEEPSEEK_API_KEY。providers 的格式與 Novel Studio 相同，之後整合時可以直接共用。",
+  "providers": [
+    {
+      "id": "deepseek",
+      "type": "openai",
+      "name": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "key_env": "DEEPSEEK_API_KEY",
+      "context_tokens": 128000,
+      "max_output": 32000,
+      "temperature": 1.0,
+      "json_mode": true
+    },
+    {
+      "id": "llamacpp",
+      "type": "openai",
+      "name": "llama.cpp（本機）",
+      "base_url": "http://127.0.0.1:8080/v1",
+      "model": "",
+      "key_env": "",
+      "context_tokens": 32768,
+      "max_output": 10000,
+      "temperature": 0.8,
+      "json_mode": true
+    }
+  ],
+  "default_provider": "deepseek",
+  "stage_providers": {
+    "_說明": "每個階段可以指定不同的模型；空字串＝用 default_provider。",
+    "adapt": "",
+    "script": "",
+    "storyboard": "",
+    "bible": ""
+  },
+  "comfy": {
+    "_說明": "出圖 profile（N4）：每一組是一種模型家族（kind: moss 或 anima）。同一臺 ComfyUI 只能掛一組模型，換 profile 就要在 ComfyUI 換模型。project.yaml 的 comfy_profile 指定這一部作品用哪一組，沒寫就用 default_profile。沒有 profiles 的舊設定照舊可用：頂層的 workflow／models／presets 等於一組 moss。",
+    "url": "http://127.0.0.1:8188",
+    "default_profile": "moss",
+    "profiles": {
+      "_說明": "kind：moss＝MOSS-Image（內建 moss_layout.api.json）、anima＝Anima（內建 anima.api.json）。workflow 留空＝內建的，也可以給路徑（相對 config.json）。models 的檔名用 ComfyUI 列出的名稱（含子資料夾）。presets 是取樣設定，不是 default_preset 的那組檔名會加後綴；loras 接在預設的 lora 後面。",
+      "moss": {
+        "kind": "moss",
+        "workflow": "",
+        "models": {
+          "unet": "moss_image_sft_int8_convrot.safetensors",
+          "clip": "qwen3.5_9b_w4a8_gptq.safetensors",
+          "vae": "flux2-vae_small.safetensors"
+        },
+        "negative": "",
+        "default_preset": "final",
+        "presets": {
+          "final": {
+            "steps": 25,
+            "cfg": 2.5,
+            "sampler": "er_sde",
+            "scheduler": "simple"
+          },
+          "draft": {
+            "steps": 4,
+            "cfg": 1.0,
+            "sampler": "euler",
+            "scheduler": "simple",
+            "lora": "ANIMA\\moss_image_sft_4step_v2.0.safetensors",
+            "lora_strength": 1.0
+          }
+        }
+      },
+      "anima": {
+        "kind": "anima",
+        "workflow": "",
+        "models": {
+          "unet": "UnstableAnima-Art-V4.safetensors",
+          "clip": "qwen_3_06b_base.safetensors",
+          "vae": "qwen_image_vae.safetensors"
+        },
+        "negative": "score_4, score_5, jpeg artifacts, worst_quality, bad_quality, bad_hands, lowres, watermark, text, speech bubble, letters, comic_frame",
+        "default_preset": "final",
+        "presets": {
+          "final": {
+            "steps": 12,
+            "cfg": 1.8,
+            "sampler": "er_sde",
+            "scheduler": "beta"
+          },
+          "draft": {
+            "steps": 8,
+            "cfg": 1.8,
+            "sampler": "euler",
+            "scheduler": "beta"
+          }
+        }
+      }
+    }
+  },
+  "lettering": {
+    "_說明": "嵌字用的字型（TTF／OTF／TTC 的完整路徑；TTC 可以在後面加 #索引）。空白＝自動找（Noto CJK TC、思源、微軟正黑體…）。字型不隨專案發佈，請自己安裝並確認授權。說明見 docs/03_建置與環境.md 第 7 節。",
+    "dialogue_font": "",
+    "shout_font": "",
+    "narration_font": "",
+    "sfx_font": "",
+    "vertical": true,
+    "dialogue_pt": 9,
+    "narration_pt": 8.5
+  }
+}

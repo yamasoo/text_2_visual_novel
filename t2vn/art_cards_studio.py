@@ -91,6 +91,55 @@ def overview(work: Path, library: Path | None, lang: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ AI 草擬
 
+def _library_story_core(library: Path | None) -> str:
+    """從書庫的故事核心檔摘取時代／世界觀背景（最多約 800 字）。"""
+    if library is None or not Path(library).is_dir():
+        return ""
+    for rel in ("bible/story-core.md", "設定/故事核心.md"):
+        p = Path(library) / rel
+        if p.is_file():
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore").strip()
+                if text.startswith("---"):
+                    end = text.find("\n---", 3)
+                    if end > 0:
+                        text = text[end + 4 :].strip()
+                return text[:800]
+            except OSError:
+                return ""
+    return ""
+
+
+def read_world_context(work: Path, library: Path | None = None) -> dict[str, str]:
+    """讀本書的時代與服飾基調：回傳 ``{"world_context": 自訂值, "fallback": 書庫自動摘錄}``。"""
+    style = art_cards._read_json(art_cards._style_path(work), {})
+    custom = str(style.get("world_context") or "").strip() if isinstance(style, dict) else ""
+    return {"world_context": custom, "fallback": _library_story_core(library)}
+
+
+def save_world_context(assert_writable: Callable[[Path], Any], work: Path, text: str) -> str:
+    """存本書的時代與服飾基調到 ``work/art/style.json`` 的 ``world_context``（空字串表示清除並退回自動讀取）。"""
+    path = art_cards._style_path(work)
+    style = art_cards._read_json(path, {})
+    if not isinstance(style, dict):
+        style = {}
+    cleaned = str(text or "").strip()
+    if cleaned:
+        style["world_context"] = cleaned
+    else:
+        style.pop("world_context", None)
+    art_cards._write_json(assert_writable, path, style)
+    return cleaned
+
+
+def _world_context(library: Path | None, work: Path | None = None) -> str:
+    """優先使用本書自訂的 ``world_context``，留空才退回書庫 ``story-core.md``。"""
+    if work is not None:
+        info = read_world_context(work, library)
+        return info["world_context"] or info["fallback"]
+    return _library_story_core(library)
+
+
 def draft(work: Path, library: Path | None, lang: str, char_id: str, wild: dict[str, list[str]],
           enabled: list[str] | None, llm: LlmFn, hooks: RunHooks | None = None) -> dict[str, Any]:
     """請 AI 草擬外型卡。回傳 ``{card, warnings, evidence}``，不存檔；``evidence`` 是 UI 要顯示的段落（dict）。"""
@@ -101,13 +150,16 @@ def draft(work: Path, library: Path | None, lang: str, char_id: str, wild: dict[
     evidence = art_appearance.find_evidence(docs, row["names"], art_appearance.CHARACTER_KEYWORDS)
     character = {"name": row["label"], "summary": "", "appearance": row["card_text"]}
     current = art_cards.get_card(work, char_id) if art_cards.card_path(work, char_id).is_file() else None
+    world_ctx = _world_context(library, work)
     state = {"round": 0}
 
     def ask(prompt: str) -> str:
         state["round"] += 1
         return call_llm(llm, [{"role": "user", "content": prompt}], hooks, state["round"]).text
 
-    card, warnings = art_cards.draft_card(char_id, character, [e["text"] for e in evidence], wild, enabled, ask, current)
+    card, warnings = art_cards.draft_card(
+        char_id, character, [e["text"] for e in evidence], wild, enabled, ask, current, world_context=world_ctx
+    )
     if not evidence and not row["card_text"]:
         warnings = ["設定卡與內文都沒找到外觀描寫，這份是依人名、職業與身分推測的通用外觀，請自己修改"] + list(warnings)
     return {"card": card, "warnings": warnings, "evidence": evidence}

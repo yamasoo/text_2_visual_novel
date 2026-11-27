@@ -166,3 +166,49 @@ def test_server_test_route_and_job_executor(tmp_path, monkeypatch):
     assert state["default_executor"] == "deepseek"
     put = http.put("/api/settings", json={"executors": {"default": "llamacpp"}}).json()
     assert put["executors"]["default"] == "llamacpp"
+
+
+def test_gemini_builtin_overlay_and_overrides(tmp_path, monkeypatch):
+    rows = executors.build_providers({})
+    by = {r["id"]: r for r in rows}
+    assert "gemini" in by
+    gem = by["gemini"]
+    assert gem["type"] == "gemini"
+    assert gem["temperature"] == 0.3
+    assert gem["safety_relax"] is True
+    assert gem["reasoning"]["adapter"] == "gemini_thinking"
+
+    neon = executors.resolve_executor(rows, "gemini/gemini-4-neon")
+    assert neon["model"] == "gemini-4-neon" and neon["type"] == "gemini"
+
+    # safety_relax 覆寫與型別驗證
+    rows2 = executors.build_providers({"gemini": {"safety_relax": False, "reasoning": {"structured": "medium"}}})
+    gem2 = executors.resolve_executor(rows2, "gemini")
+    assert gem2["safety_relax"] is False
+    assert executors.structured_effort(gem2) == "medium"
+    with pytest.raises(ConfigError):
+        executors.build_providers({"gemini": {"safety_relax": "yes"}})
+
+    # .env 讀取 GEMINI_API_KEY + make_llm_from 串接 providers.chat
+    from t2vn import llm as llm_mod
+    from vendor.novel_studio import providers
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(providers, "_keyring", lambda: None)
+    (tmp_path / ".env").write_text('GEMINI_API_KEY="gem-test-key-1234"\n', encoding="utf-8")
+    found, where = llm_mod.key_status("gemini", secrets_home=tmp_path)
+    assert found and ".env" in where
+
+    called = {}
+
+    def fake_chat(home, prov, messages, **kwargs):
+        called["type"] = prov["type"]
+        called["model"] = prov["model"]
+        called["key"] = providers.api_key(home, prov)
+        return ('{"ok": true}', {"prompt_tokens": 10, "completion_tokens": 5})
+
+    monkeypatch.setattr(providers, "chat", fake_chat)
+    fn = llm_mod.make_llm_from(neon, secrets_home=tmp_path)
+    res = fn([{"role": "user", "content": "hi"}])
+    assert res.text == '{"ok": true}'
+    assert called == {"type": "gemini", "model": "gemini-4-neon", "key": "gem-test-key-1234"}

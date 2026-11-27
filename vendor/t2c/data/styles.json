@@ -1,0 +1,30 @@
+{
+  "_doc": "畫風預設集（N5）。project.yaml 的 style_preset 選一組；明寫的 style／meta／look 蓋掉該欄位。look 只給文字端提示詞用，style／meta／sfx 給生圖。",
+  "default": "mono",
+  "presets": {
+    "mono": {
+      "name": "日式黑白頁漫",
+      "gray": true,
+      "look": "日式黑白頁漫",
+      "style": "Black and white Japanese manga artwork, clean confident ink lineart, screentone shading, high contrast, no color",
+      "meta": ["manga panel", "black and white", "screentone"],
+      "sfx": "Bold hand-drawn manga sound effect lettering in black ink."
+    },
+    "color": {
+      "name": "彩色日式頁漫",
+      "gray": false,
+      "look": "彩色日式頁漫",
+      "style": "Full color Japanese manga artwork, clean confident lineart, vivid cel shading, soft rim light, rich saturated palette",
+      "meta": ["manga panel", "full color", "cel shading"],
+      "sfx": "Bold hand-drawn manga sound effect lettering with flat colored fill and dark outline."
+    },
+    "american": {
+      "name": "美式彩色漫畫",
+      "gray": false,
+      "look": "美式彩色漫畫",
+      "style": "American comic book illustration, bold dynamic inking, dramatic light and shadow, halftone shading, full color",
+      "meta": ["comic panel", "american comic book", "full color"],
+      "sfx": "Bold comic book sound effect lettering with colored fill and heavy dark outline."
+    }
+  }
+}

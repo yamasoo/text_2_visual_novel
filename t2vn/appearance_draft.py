@@ -20,13 +20,29 @@ FIELD_HELP = {
     ),
     "sprite_prompt": (
         "everything below the neck, as comma-separated tags: clothing (follow the faction or occupation uniform "
-        "if the story gives one), body type, accessories carried. Always a neutral standing pose with arms relaxed at the sides: "
+        "if the story gives one; always specify an explicit color or light/dark tone for every garment such as "
+        "off-white, light gray, dark navy, brown, or black — even when the novel omits color, pick a consistent "
+        "tone so outfits do not flip between light and dark across renders), body type, accessories carried. "
+        "Always a neutral standing pose with arms relaxed at the sides: "
         "do NOT write sitting, crouching, kneeling, leaning, or any action from the story. "
         "Do NOT repeat anything from headshot_prompt"
     ),
+    "t2c": (
+        "structured comic/manga card matching the prompts above: "
+        '{"sections": {"head": [...], "body": [...], "upper": [], "lower": [], "accessory": []}, '
+        '"outfits": {"default": {"top": [...], "bottom": [...], "set": []}}}. '
+        "Rules for t2c: sections.head MUST include explicit age and gender (e.g. '19-year-old woman', 'middle-aged man'; "
+        "for non-human characters such as a dragon, animal, creature or robot, write '1other' plus species like 'small gray dragon' instead of human gender/age) "
+        "plus hair color/style and eye color/shape (or scales/horns/fur/eye color for non-humans) only (NO clothing, NO expression, NO pose); sections.body = build/height/skin tone only; "
+        "sections.upper and sections.lower = permanent body features only (scars, tattoos, prosthetics — NOT clothing, leave [] if none); "
+        "sections.accessory = permanent personal items (glasses, pendant, hair tie). "
+        "outfits.default MUST be a complete outfit fitting the story's era/world setting (top + bottom + footwear, or set + footwear), "
+        "with an explicit color or light/dark tone on EVERY item (e.g. 'off-white linen blouse', 'dark brown leather boots'); "
+        "NEVER put actions, poses, expressions, or notes (like 'careful stance' or 'removed for formal occasions') in outfits."
+    ),
 }
 INTRO = (
-    "You are drafting an appearance card for an anime-style visual novel character, "
+    "You are drafting an appearance card for an anime-style visual novel and manga character, "
     "to be turned into image prompts."
 )
 CHARACTER_KEYS = ("name", "summary", "appearance")
@@ -38,13 +54,11 @@ NO_EVIDENCE_LINE = (
     "There are no passages describing this character's looks; follow the fallback rule below."
 )
 FALLBACK_LINE = (
-    "Fallback rule: never return both prompts empty. When the passages and character data say "
-    "nothing about looks (common for minor characters), infer a plausible, plain, generic anime "
-    "appearance from the character's name (gender, age and cultural setting cues), occupation, "
-    "role and faction. Examples: a dockworker -> short hair, work clothes, gloves; a patrol guard "
-    "-> uniform, cap; an old fisherman -> gray hair, weathered face, simple coat. Do not invent "
-    "scars, tattoos or other distinctive marks. Keep headshot_prompt to hair, eyes and head "
-    "features only, and sprite_prompt to clothing and build only."
+    "Fallback rule: never return both prompts empty or leave half-empty outfits. When the passages and character data omit "
+    "age, gender, hair, build, or parts of clothing (common for minor characters or unmentioned lower-body/footwear), "
+    "infer a plausible, complete appearance consistent with the story's era/world setting, character name, occupation, "
+    "role and faction. Always include age, gender, hair, eyes, body build, and a complete outfit (top + bottom + footwear, "
+    "or full set + footwear) with explicit color or light/dark tone on every garment. Do not invent scars or tattoos unless stated."
 )
 DRAFT_TITLE = "Current draft (revise it, keep what is still correct):"
 WILDCARD_TITLE = (
@@ -57,8 +71,9 @@ FENCED = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 WILDCARD_WARNING = "不在清單內的 wildcard"
 
 REPLY_FORMAT = (
-    'Return ONLY one JSON object, no commentary: {"headshot_prompt": "", '
-    '"sprite_prompt": ""}. All values are strings.'
+    'Return ONLY one JSON object, no commentary: {"headshot_prompt": "", "sprite_prompt": "", '
+    '"t2c": {"sections": {"head": [], "body": [], "upper": [], "lower": [], "accessory": []}, '
+    '"outfits": {"default": {"top": [], "bottom": [], "set": []}}}}.'
 )
 
 
@@ -67,15 +82,16 @@ def build_prompt(
     evidence: list[str],
     wildcards: list[dict[str, Any]] | None = None,
     current: dict[str, Any] | None = None,
+    world_context: str = "",
 ) -> str:
-    """組給 AI 的英文提示詞（角色資料、證據、wildcard 摘要、目前草稿）。
-
-    各段依序：任務說明與回覆格式、兩個欄位說明、wildcard 清單（有才出現）、
-    ``Character:`` 區塊、內文證據（沒有證據時是一行說明）、目前草稿（有才出現）。
-    """
+    """組給 AI 的英文提示詞（角色資料、世界觀／時代背景、證據、wildcard 摘要、目前草稿）。"""
     lines = [INTRO, REPLY_FORMAT, "Fields:"]
-    for field in PROMPT_FIELDS:
+    for field in (*PROMPT_FIELDS, "t2c"):
         lines.append(f"- {field}: {FIELD_HELP[field]}")
+
+    if isinstance(world_context, str) and world_context.strip():
+        lines.append("Story era / world setting (match clothing style and materials to this setting):")
+        lines.append(world_context.strip())
 
     if wildcards:
         lines.append(WILDCARD_TITLE)
@@ -180,8 +196,15 @@ def parse_reply(
 
     allowed = set(allowed_wildcards or [])
     warnings: list[str] = []
-    result = {
+    result: dict[str, Any] = {
         field: _clean_value(data.get(field), field, allowed, warnings)
         for field in PROMPT_FIELDS
     }
+    if isinstance(data.get("t2c"), dict):
+        from . import appearance_card
+
+        block = appearance_card.t2c_block({"t2c": data["t2c"]})
+        if block is not None:
+            block["source_sha1"] = appearance_card.prompt_fingerprint(result)
+            result["t2c"] = block
     return result, warnings

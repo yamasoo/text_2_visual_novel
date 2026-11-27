@@ -93,8 +93,8 @@ def test_generate_per_character_headshots_and_sprite(tmp_path):
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "sprite": True, "candidates": 1}).json()
     job = wait_job(http, started["id"])
     assert job["status"] == "done", job
-    assert sorted(job["summary"]["generated"]) == ["headshot_lao_zhang_neutral", "headshot_lao_zhang_smile", "sprite_lao_zhang_neutral"]
-    assert not job["summary"]["failed"]
+    assert sorted(job["result"]["generated"]) == ["headshot_lao_zhang_neutral", "headshot_lao_zhang_smile", "sprite_lao_zhang_neutral"]
+    assert not job["result"]["failed"]
     row = _row(http)
     assert [len(a["candidates"]) for a in row["assets"]] == [1, 1, 1]
     shot = row["assets"][0]["candidates"][0]
@@ -113,7 +113,7 @@ def test_generate_only_headshot_when_sprite_not_ticked(tmp_path):
     _ready_card(http)
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "candidates": 2}).json()
     job = wait_job(http, started["id"])
-    assert job["summary"]["generated"] == ["headshot_lao_zhang_neutral"] and len(fake.calls) == 2
+    assert job["result"]["generated"] == ["headshot_lao_zhang_neutral"] and len(fake.calls) == 2
     assert [len(a["candidates"]) for a in _row(http)["assets"] if a["kind"] == "sprite"] == [0]
 
 
@@ -246,6 +246,18 @@ def test_styles_upload_xlsx(tmp_path):
     assert http.post("/api/books/demo/art/styles/upload", content=b"notxlsx", headers={"X-Filename": "a.xlsx"}).status_code == 400
 
 
+def test_styles_upload_rejects_oversize_body(tmp_path, monkeypatch):
+    from t2vn import server as server_module
+
+    http, config, _ = make_http(tmp_path)
+    monkeypatch.setattr(server_module, "STYLES_MAX_BYTES", 1024)
+    declared = http.post("/api/books/demo/art/styles/upload", content=b"x" * 4096, headers={"X-Filename": "big.xlsx"})
+    assert declared.status_code == 413 and "太大" in declared.json()["error"]
+    streamed = http.post("/api/books/demo/art/styles/upload", content=iter([b"x" * 4096]), headers={"X-Filename": "big2.xlsx"})
+    assert streamed.status_code == 413
+    assert not list((config.project_root / "config").glob("big*.xlsx"))  # 連半個檔都沒留下
+
+
 def test_generate_again_adds_new_candidates_even_if_some_exist(tmp_path):
     http, config, fake = make_http(tmp_path)
     _ready_card(http)
@@ -300,4 +312,4 @@ def test_supporting_character_only_gets_neutral_even_if_card_checks_more(tmp_pat
     assert "headshot_lao_zhang_neutral" in ids and "headshot_lao_zhang_smile" not in ids
     started = http.post("/api/books/demo/art/cards/generate", json={"char_id": "lao_zhang", "headshot": True, "sprite": True, "candidates": 1}).json()
     job = wait_job(http, started["id"])
-    assert sorted(job["summary"]["generated"]) == ["headshot_lao_zhang_neutral", "sprite_lao_zhang_neutral"]
+    assert sorted(job["result"]["generated"]) == ["headshot_lao_zhang_neutral", "sprite_lao_zhang_neutral"]

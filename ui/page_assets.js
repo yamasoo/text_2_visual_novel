@@ -1,24 +1,35 @@
 /* 素材頁：圖片素材清單與出圖、外觀（AI 草擬後由你確認）、畫風設定。#/book/<id>/assets */
 "use strict";
 
-PAGES.assets = async function (bookId, rest) {
-  crumbs([{ label: "書架", href: "#/" }, { label: bookId, href: `#/book/${bookId}` }, { label: "素材" }]);
-  const TAB_KEY = "assets.tab";
-  let tab = (rest && rest[0]) || sessionStorage.getItem(TAB_KEY) || "list";
-  if (!["list", "look", "style"].includes(tab)) tab = "list";
+// 進行中的任務追蹤器：換分頁或離開這一頁時一起收掉，遲到的回呼才不會改到已卸下的節點。
+const assetTrackers = new Set();
+
+function closeAssetTrackers() {
+  for (const item of assetTrackers) item.close();
+  assetTrackers.clear();
+}
+
+FE.PAGES["book/:id/assets"] = async (ctx) => {
+  const bookId = ctx.params.id;
+  const rest = ctx.args;
+  closeAssetTrackers();
+  ctx.signal.addEventListener("abort", closeAssetTrackers, { once: true });
+  ctx.crumbs([{ label: "書架", href: "#/" }, { label: bookId, href: `#/book/${bookId}` }, { label: "素材" }]);
+  const TAB_KEY = "assets_tab";
+  let tab = (rest && rest[0]) || FE.store.get(TAB_KEY, "look") || "look";
+  if (!["list", "look", "style"].includes(tab)) tab = "look";
   const base = `/api/books/${bookId}/art`;
   const STATUS = { planned: ["待出圖", ""], generated: ["已出圖，待挑選", "info"], selected: ["已挑選", "info"], processed: ["已處理", "ok"], final: ["定稿", "ok"] };
   const KIND = { bg: "背景", sprite: "立繪", headshot: "頭像" };
   const body = h("div");
   const tabs = h("div", { class: "tabs" });
-  let pollTimer = null;
 
   function drawTabs() {
-    tabs.replaceChildren(...[["list", "素材清單"], ["look", "外觀"], ["style", "畫風與出圖設定"]].map(([k, label]) =>
-      h("div", { class: "tab" + (k === tab ? " on" : ""), onclick: () => { tab = k; try { sessionStorage.setItem(TAB_KEY, k); } catch (_) { /* 無法記住分頁也沒關係 */ } drawTabs(); show(); } }, label)));
+    tabs.replaceChildren(...[["look", "外觀"], ["list", "素材清單"], ["style", "畫風（這本書）"]].map(([k, label]) =>
+      h("div", { class: tabClass(k === tab), onclick: () => { tab = k; FE.store.set(TAB_KEY, k); drawTabs(); show(); } }, label)));
   }
   async function show() {
-    clearTimeout(pollTimer);
+    closeAssetTrackers();
     body.replaceChildren(h("div", { class: "muted" }, "載入中…"));
     try {
       body.replaceChildren(await (tab === "list" ? listPane() : tab === "look" ? lookPane() : stylePane()));
@@ -28,8 +39,8 @@ PAGES.assets = async function (bookId, rest) {
 
   /* ---------------------------------------------------------------- 素材清單 */
   async function listPane() {
-    const data = await api(`${base}/assets`);
-    const style = await api(`${base}/style`);
+    const data = await api(`${base}/assets`, { signal: ctx.signal });
+    const style = await api(`${base}/style`, { signal: ctx.signal });
     const wrap = h("div");
     const progress = h("div", { class: "card", hidden: true });
     let kindFilter = "", statusFilter = "";
@@ -37,28 +48,32 @@ PAGES.assets = async function (bookId, rest) {
     async function startJob(payload) {
       try {
         const job = await api(`${base}/generate`, { body: payload });
-        AiPanel.poll();
+        Panel.attach(job.id);
         watch(job.id);
       } catch (error) { fail(error); }
     }
     function watch(jobId) {
       progress.hidden = false;
-      const tick = async () => {
-        try {
-          const j = await api(`/api/jobs/${jobId}`);
-          const c = j.current || {};
-          const running = j.status === "running";
-          progress.replaceChildren(
-            h("div", { class: "row" }, h("strong", {}, running ? "出圖中" : { done: "出圖完成", stopped: "已停止", error: "結束（有錯誤）" }[j.status] || j.status), h("span", { class: "grow" }),
-              running ? h("button", { class: "sm", onclick: async () => { try { await api(`/api/jobs/${j.id}/stop`, { method: "POST", body: {} }); } catch (e) { fail(e); } } }, "■ 停止") : ""),
-            h("div", { class: "bar" }, h("i", { style: `width:${c.total ? Math.round((100 * ((c.index || 1) - 1 + (c.event === "asset_done" ? 1 : 0))) / c.total) : (running ? 0 : 100)}%` })),
-            h("div", { class: "small" }, running ? (c.asset ? `${c.asset}（第 ${c.index}/${c.total} 項` + (c.of ? `，這項第 ${c.n}/${c.of} 張` : "") + "）" : "準備中…") : ""),
-            !running && j.summary ? h("div", { class: "small" }, `新出圖 ${(j.summary.generated || []).length} 項，沒變動 ${(j.summary.skipped || []).length} 項` + (Object.keys(j.summary.failed || {}).length ? `，失敗 ${Object.keys(j.summary.failed).length} 項（看右側面板的紀錄）` : "")) : "");
-          if (running) pollTimer = setTimeout(tick, 1500);
-          else show();
-        } catch (error) { progress.replaceChildren(h("div", { class: "bad small" }, error.message)); }
+      let tracker = null;
+      const paint = (job) => {
+        const running = !job.gone && (job.status === "running" || job.status === "queued");
+        const done = job.progress ? job.progress.done : 0;
+        const total = job.progress ? job.progress.total : 0;
+        const percent = total ? Math.round((100 * done) / total) : (running ? 0 : 100);
+        progress.replaceChildren(
+          h("div", { class: "row" }, h("strong", {}, running ? "出圖中" : { done: "出圖完成", stopped: "已停止", error: "結束（有錯誤）" }[job.status] || "結束（有錯誤）"), h("span", { class: "grow" }),
+            running ? h("button", { class: "sm", onclick: () => { if (tracker) tracker.stop().catch(fail); } }, "■ 停止") : ""),
+          h("div", { class: "bar" }, h("i", { style: `width:${percent}%` })),
+          h("div", { class: "small" }, running ? job.note || "準備中…" : ""),
+          !running && job.result ? h("div", { class: "small" }, `新出圖 ${(job.result.generated || []).length} 項，沒變動 ${(job.result.skipped || []).length} 項` + (Object.keys(job.result.failed || {}).length ? `，失敗 ${Object.keys(job.result.failed).length} 項（看右側面板的紀錄）` : "")) : "");
       };
-      tick();
+      closeAssetTrackers();
+      tracker = FE.jobs.watch(jobId, { base: "/api/fe-jobs", onupdate: paint, onend: (job) => {
+        assetTrackers.delete(tracker);
+        paint(job);
+        show();
+      } });
+      assetTrackers.add(tracker);
     }
     async function pick(asset, name) {
       try { await api(`${base}/select`, { body: { asset_id: asset.asset_id, name } }); toast(`${asset.asset_id} 已挑選並處理`); show(); } catch (error) { fail(error); }
@@ -66,7 +81,7 @@ PAGES.assets = async function (bookId, rest) {
     async function setStatus(asset, status) {
       let license = asset.license || "";
       if (status === "final") {
-        license = prompt("定稿前請填授權／來源說明（例如：AI 生成，自用）", license || "AI 生成（Anima），自用");
+        license = await ask("定稿前請填授權／來源說明（例如：AI 生成，自用）", license || "AI 生成（Anima），自用");
         if (!license) return;
       }
       try { await api(`${base}/status`, { body: { asset_id: asset.asset_id, status, license } }); show(); } catch (error) { fail(error); }
@@ -80,20 +95,20 @@ PAGES.assets = async function (bookId, rest) {
       toast(failed ? `完成，但有 ${failed} 項失敗` : `已更新 ${ids.length} 項`);
       show();
     }
-    function bulkFinalize() {
+    async function bulkFinalize() {
       const ids = data.assets.filter((a) => a.status === "processed").map((a) => a.asset_id);
       if (!ids.length) return;
-      const license = prompt(`一次定稿 ${ids.length} 項已挑選好的素材。請填授權／來源說明`, "AI 生成（Anima），自用");
+      const license = await ask(`一次定稿 ${ids.length} 項已挑選好的素材。請填授權／來源說明`, "AI 生成（Anima），自用");
       if (license) bulkStatus(ids, "final", license);
     }
-    function bulkUnfinalize() {
+    async function bulkUnfinalize() {
       const ids = data.assets.filter((a) => a.status === "final").map((a) => a.asset_id);
-      if (ids.length && confirm(`把 ${ids.length} 項已定稿的素材全部退回「已處理」？`)) bulkStatus(ids, "processed", undefined);
+      if (ids.length && (await FE.confirm(`把 ${ids.length} 項已定稿的素材全部退回「已處理」？`, { danger: true, ok: "退回" }))) bulkStatus(ids, "processed", undefined);
     }
     async function removeSelected(asset, picked) {
       const names = Array.from(picked);
       if (!names.length) return;
-      if (!confirm(`確定刪除 ${names.length} 張候選圖？不能復原。`)) return;
+      if (!(await FE.confirm(`確定刪除 ${names.length} 張候選圖？不能復原。`, { danger: true, ok: "刪除" }))) return;
       try {
         const r = await api(`${base}/candidates/delete`, { body: { asset_id: asset.asset_id, names } });
         const deleted = (r.deleted || []).length;
@@ -160,21 +175,71 @@ PAGES.assets = async function (bookId, rest) {
         toolbar,
         cands.length ? h("div", { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(" + (asset.kind === "bg" ? "220px" : "130px") + ",1fr));gap:10px;margin-top:8px" }, cands) : "");
     }
+    const SEL_KEY = `assets_sel_${bookId}`;
+    let selectedId = FE.store.get(SEL_KEY, "") || "";
+    const leftList = h("div", { class: "md-list" });
+    const rightDetail = h("div", { class: "md-detail" });
+    const list = h("div", { class: "master-detail" }, leftList, rightDetail);
+
     function draw() {
       const shown = data.assets.filter((a) => (!kindFilter || a.kind === kindFilter) && (!statusFilter || a.status === statusFilter));
-      const blocks = [];
-      let current = null;
-      for (const asset of shown) {
-        const owner = asset.char_id || "";
-        if (owner && owner !== current) {
-          blocks.push(h("h3", { style: "margin:18px 0 6px" }, `角色：${owner}`));
-        }
-        current = owner;
-        blocks.push(card(asset));
+      if (!shown.length) {
+        leftList.replaceChildren(h("div", { class: "small muted", style: "padding:10px" }, "沒有符合的素材。"));
+        rightDetail.replaceChildren(h("div", { class: "card muted" }, "沒有符合篩選條件的素材。"));
+        return;
       }
-      list.replaceChildren(...(blocks.length ? blocks : [h("div", { class: "card muted" }, "沒有符合的素材。")]));
+      if (!shown.some((a) => a.asset_id === selectedId)) {
+        selectedId = shown[0].asset_id;
+      }
+      const items = [];
+      let currentGroup = null;
+      for (const asset of shown) {
+        const groupName = asset.kind === "bg" ? "背景" : asset.char_id ? `角色：${asset.char_id}` : (KIND[asset.kind] || asset.kind);
+        if (groupName !== currentGroup) {
+          items.push(h("div", { class: "small muted", style: "padding:6px 8px 2px;font-weight:600;border-top:1px solid var(--line);margin-top:4px" }, groupName));
+          currentGroup = groupName;
+        }
+        const [sLabel, sKind] = STATUS[asset.status] || [asset.status, ""];
+        const active = asset.asset_id === selectedId;
+        items.push(h("div", {
+          class: "md-item" + (active ? " active" : ""),
+          onclick: () => { selectedId = asset.asset_id; FE.store.set(SEL_KEY, selectedId); draw(); },
+        },
+          h("div", { class: "row", style: "gap:4px;justify-content:space-between" },
+            h("strong", { class: "small" }, Object.values(asset.names || {})[0] || asset.asset_id),
+            badge(sLabel, sKind)),
+          h("div", { class: "small muted" }, `${asset.asset_id}${(asset.candidates || []).length ? ` · ${asset.candidates.length} 張` : ""}`)));
+      }
+      leftList.replaceChildren(...items);
+
+      const idx = shown.findIndex((a) => a.asset_id === selectedId);
+      const chosen = shown[idx >= 0 ? idx : 0];
+      const goIdx = (next) => {
+        if (next < 0 || next >= shown.length) return;
+        selectedId = shown[next].asset_id;
+        FE.store.set(SEL_KEY, selectedId);
+        draw();
+      };
+      const nextNeedPick = () => {
+        for (let step = 1; step <= shown.length; step++) {
+          const cand = shown[(idx + step) % shown.length];
+          if (cand.status === "generated" || (cand.status === "planned" && (cand.candidates || []).length > 0)) {
+            selectedId = cand.asset_id;
+            FE.store.set(SEL_KEY, selectedId);
+            draw();
+            return;
+          }
+        }
+        toast("目前篩選裡沒有「待挑圖」的項目", "ok");
+      };
+      const navBar = h("div", { class: "card row", style: "padding:8px 12px;margin-bottom:10px;align-items:center" },
+        h("button", { class: "sm", disabled: idx <= 0, onclick: () => goIdx(idx - 1) }, "← 上一項"),
+        h("button", { class: "sm", disabled: idx >= shown.length - 1, onclick: () => goIdx(idx + 1) }, "下一項 →"),
+        h("button", { class: "sm primary", onclick: nextNeedPick }, "下一個待挑 →"),
+        h("span", { class: "grow" }),
+        h("span", { class: "small muted" }, `第 ${idx + 1} / ${shown.length} 項`));
+      rightDetail.replaceChildren(navBar, card(chosen));
     }
-    const list = h("div");
     if (!data.ready) {
       wrap.append(h("div", { class: "card" }, h("p", {}, "還沒有素材清單。先標註好章節，再按下面的按鈕，系統會掃描場景列出需要的背景與立繪。"),
         h("button", { onclick: async () => { try { await api(`${base}/refresh`, { method: "POST", body: {} }); show(); } catch (e) { fail(e); } } }, "掃描場景建立清單")));
@@ -184,7 +249,15 @@ PAGES.assets = async function (bookId, rest) {
     const processedCount = data.assets.filter((a) => a.status === "processed").length;
     const finalCount = data.assets.filter((a) => a.status === "final").length;
     const counts = Object.entries(data.counts).map(([k, v]) => badge(`${(STATUS[k] || [k])[0]} ${v}`, (STATUS[k] || [])[1]));
+    const onlyCover = data.assets.length > 0 && data.assets.every((a) => a.kind === "cover");
+    const noScenesHint = onlyCover
+      ? h("div", { class: "card small", style: "border-left:3px solid var(--warn)" },
+          "目前素材清單只有封面（尚無背景或立繪），因為這本書還沒執行視覺小說（VN）的「AI 標註」。請先到 ",
+          h("a", { href: `#/book/${encodeURIComponent(bookId)}` }, "視覺小說 → 章節與校對"),
+          " 執行 AI 標註，再回來按「重新掃描場景」。")
+      : "";
     wrap.append(
+      noScenesHint,
       h("div", { class: "card" },
         h("div", { class: "row" }, h("strong", {}, `圖片素材 ${data.assets.length} 項`), ...counts, h("span", { class: "grow" }),
           h("button", { class: "ghost sm", onclick: async () => { try { await api(`${base}/refresh`, { method: "POST", body: {} }); toast("已重新掃描"); show(); } catch (e) { fail(e); } } }, "重新掃描場景"),
@@ -198,14 +271,14 @@ PAGES.assets = async function (bookId, rest) {
           select([["", "全部狀態"], ...Object.entries(STATUS).map(([k, v]) => [k, v[0]])], "", (v) => { statusFilter = v; draw(); }))),
       progress, list);
     draw();
-    const active = (await api("/api/jobs/active")).job;
-    if (active && active.kind === "art" && active.book_id === bookId && active.status === "running") watch(active.id);
+    const active = (await api(`/api/books/${bookId}/jobs/active`, { signal: ctx.signal })).job;
+    if (active && active.kind === "art" && active.status === "running") watch(active.id);
     return wrap;
   }
 
   /* ---------------------------------------------------------------- 外觀 */
   async function lookPane() {
-    const data = await api(`${base}/appearance`);
+    const data = await api(`${base}/appearance`, { signal: ctx.signal });
     const wrap = h("div");
     wrap.append(h("div", { class: "card small muted" }, "每個地點和角色要有「外觀」才畫得準：先按「AI 草擬」（會參考設定卡的「外在」和小說裡的描寫段落），你改到滿意再按「確認」。標籤用英文 Danbooru 標籤，描述用英文短句。沒有依據的地方 AI 會在備註提醒，請自己補。"));
 
@@ -217,20 +290,24 @@ PAGES.assets = async function (bookId, rest) {
       const button = h("button", { class: "sm" }, "出圖");
       const status = (item.assets || []).map((a) => `${a.time ? a.time + "：" : ""}${a.in_manifest ? `${(STATUS[a.status] || [a.status])[0]}${a.candidates ? `，${a.candidates} 張候選` : ""}` : "尚未加入素材清單"}`).join("；");
       line.textContent = ids.length ? `背景素材：${status}` : "這個地點還沒有背景素材（先按「掃描場景建立清單」）";
-      const watch = async (jobId) => {
-        try {
-          const j = await api(`/api/jobs/${jobId}`);
-          const c = j.current || {};
-          if (j.status === "running") {
-            line.textContent = c.asset ? `出圖中：${c.asset}（第 ${c.index}/${c.total} 項` + (c.of ? `，這項第 ${c.n}/${c.of} 張` : "") + "）" : "出圖準備中…";
-            pollTimer = setTimeout(() => watch(jobId), 1500);
+      const watch = (jobId) => {
+        const paint = (job) => {
+          if (job.gone) { button.disabled = false; line.textContent = "出圖結束（找不到任務）"; return; }
+          if (job.status === "running" || job.status === "queued") {
+            line.textContent = job.note ? `出圖中：${job.note}` : "出圖準備中…";
             return;
           }
           button.disabled = false;
-          const failed = Object.keys((j.summary && j.summary.failed) || {}).length;
-          line.textContent = j.status === "done" ? `出圖完成${failed ? `，但有 ${failed} 項失敗（看右側面板）` : ""}，到「素材清單」挑選候選圖` : `出圖結束（${j.status}）`;
-          if (j.status === "done") toast(`${item.label} 出圖完成，到「素材清單」挑選`);
-        } catch (error) { button.disabled = false; fail(error); }
+          const failed = Object.keys((job.result && job.result.failed) || {}).length;
+          line.textContent = job.status === "done" ? `出圖完成${failed ? `，但有 ${failed} 項失敗（看右側面板）` : ""}，到「素材清單」挑選候選圖` : `出圖結束（${job.status}）`;
+        };
+        closeAssetTrackers();
+        const tracker = FE.jobs.watch(jobId, { base: "/api/fe-jobs", onupdate: paint, onend: (job) => {
+          assetTrackers.delete(tracker);
+          paint(job);
+          if (job.status === "done") toast(`${item.label} 出圖完成，到「素材清單」挑選`);
+        } });
+        assetTrackers.add(tracker);
       };
       button.addEventListener("click", async () => {
         if (!ids.length) return toast("還沒有背景素材，先到「素材清單」按「掃描場景建立清單」");
@@ -241,7 +318,7 @@ PAGES.assets = async function (bookId, rest) {
           showState(!!(fields.tags || fields.description));
           await api(`${base}/refresh`, { method: "POST", body: {} });
           const job = await api(`${base}/generate`, { body: { only: ids, candidates: Math.max(1, Math.min(8, Number(count.value) || 1)), regenerate: true } });
-          AiPanel.poll();
+          Panel.attach(job.id);
           line.textContent = "出圖準備中…";
           watch(job.id);
         } catch (error) { button.disabled = false; fail(error); }
@@ -264,7 +341,7 @@ PAGES.assets = async function (bookId, rest) {
       const draft = h("button", { class: "sm", onclick: async (e) => {
         const btn = e.target; btn.disabled = true; btn.textContent = "AI 草擬中…";
         try {
-          const body = {}; const ex = AiPanel.executor(); if (ex) body.executor = ex;
+          const body = {}; const ex = Executors.value(); if (ex) body.executor = ex;
           const r = await api(`${base}/appearance/${kind}/${item.id}/draft`, { body });
           tags.value = r.tags; desc.value = r.description; notes.textContent = r.notes || "";
           showState(false);
@@ -288,33 +365,60 @@ PAGES.assets = async function (bookId, rest) {
     return wrap;
   }
 
-  /* ---------------------------------------------------------------- 畫風與出圖設定 */
+  /* ---------------------------------------------------------------- 畫風（這本書） */
   async function stylePane() {
-    const s = await api(`${base}/style`);
+    const s = await api(`${base}/style`, { signal: ctx.signal });
+    // 出圖 profile 的正本在「設定 → ComfyUI（出圖）」；這一頁只挑「這本書用哪一組」＋畫風。
+    const settings = await FE.api("/api/settings", { signal: ctx.signal }).catch(() => ({}));
+    const profiles = Object.keys(((settings.comfyui || {}).profiles) || {});
     const field = (key, label, hint, big) => {
       const el = big ? h("textarea", { rows: 2 }, s[key] || "") : h("input", { value: s[key] ?? "", style: "width:100%" });
+      if (big && window.attachTagComplete) window.attachTagComplete(el);
       return { key, el, row: h("div", { style: "margin-bottom:10px" }, h("div", {}, h("strong", {}, label), h("span", { class: "muted small" }, "　" + hint)), el) };
     };
+    const profileSelect = h("select", { id: "art_comfy_profile", style: "width:100%" },
+      [["", "（不指定：跟隨設定頁的預設 profile）"]].concat(profiles.map((name) => [name, name]))
+        .map(([value, label]) => h("option", { value, selected: String(s.profile || "") === value }, label)));
+    // 「目前實際生效」：後端用同一支 describe_profile() 算，畫面上看得出選了有沒有作用。
+    const info = s.resolved || null;
+    const nowLine = !info ? "" : h("div", { class: "small", style: "margin-top:4px" },
+      info.source === "missing"
+        ? h("span", { style: "color:var(--bad)" }, "✖ 設定頁沒有 profile「" + info.profile + "」：出圖會失敗，請到設定頁新增或改選。")
+        : h("span", { class: "muted" },
+          "目前實際生效：" + (info.source === "profile"
+            ? "profile「" + info.profile + "」" + (info.inherited ? "（跟隨設定頁的預設）" : "（這本書指定）")
+            : "相容路徑（沒有 profile）")
+          + "　模型 " + (info.kind === "moss" ? "MOSS-Image" : "Anima")
+          + "　unet " + (info.models.unet || "（自動挑）")
+          + "　clip " + (info.models.clip || "（自動挑）")
+          + "　vae " + (info.models.vae || "（自動挑）")
+          + "　preset " + (info.preset ? info.preset + " " + (info.preset_steps || "?") + " 步" : "（workflow 內建）")
+          + (info.message ? "　⚠ " + info.message : "")));
+    const profileRow = h("div", { style: "margin-bottom:10px" },
+      h("div", {}, h("strong", {}, "出圖 profile"), h("span", { class: "muted small" }, "　這本書用哪一組模型；模型檔與 ComfyUI 位址在「設定 → ComfyUI（出圖）」")),
+      profileSelect,
+      nowLine,
+      profiles.length ? "" : h("div", { class: "muted small", style: "margin-top:4px" },
+        "設定頁還沒有任何 profile：先到「設定 → ComfyUI（出圖）」新增（或沿用內建預設）。"));
     const fields = [
       field("quality", "品質標籤", "預設 masterpiece, best quality, score_7"),
-      field("artist", "畫師／畫風標籤", "留空＝Anima 預設動漫風；想指定畫風可填畫師標籤，例如 @name"),
+      field("artist", "畫師／畫風標籤", "留空＝所選 profile 的預設風格；想指定畫風可填畫師標籤，例如 @name"),
       field("extra", "全部圖共用的標籤", "例如 watercolor, soft colors"),
       field("negative", "負面提示詞", "預設已含 worst quality, watermark 等"),
-      field("unet", "主模型檔名（unet）", "留空＝自動找 ComfyUI 裡的 Anima"),
-      field("clip", "文字編碼器（clip）", "留空＝自動找"),
-      field("vae", "VAE", "留空＝自動找"),
       field("candidates", "每項出幾張候選圖", "1–16，預設 4"),
     ];
     return h("div", { class: "card" },
-      h("p", { class: "small muted" }, "目前沒有指定畫風，用 Anima 的預設動漫風出圖。想換風格時改這裡的畫師／共用標籤即可，已經出過的圖不受影響，重新出圖才會套用。"),
+      h("p", { class: "small muted" }, "這一頁只有「這本書」的畫風；模型、profile 與 ComfyUI 位址是全域設定（漫畫與 VN 共用）。已經出過的圖不受影響，重新出圖才會套用。"),
+      profileRow,
       ...fields.map((f) => f.row),
       h("button", { onclick: async () => {
         const payload = {}; for (const f of fields) payload[f.key] = f.el.value;
+        payload.profile = profileSelect.value;
         try { await api(`${base}/style`, { method: "PUT", body: payload }); toast("已儲存"); } catch (error) { fail(error); }
       } }, "儲存"));
   }
 
-  $("#view").replaceChildren(h("h1", {}, "素材"), tabs, body);
+  ctx.view(h("h1", {}, "素材"), tabs, body);
   drawTabs();
   await show();
 };

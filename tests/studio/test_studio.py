@@ -240,11 +240,12 @@ def test_http_refuses_non_local_host_and_origin(tmp_path):
 
 
 def wait_job(http, job_id):
+    """等任務結束，回傳 fekit 的 patch。"""
     import time
     for _ in range(100):
-        job = http.get(f"/api/jobs/{job_id}").json()
-        if job["status"] != "running":
-            return job
+        patch = http.get(f"/api/fe-jobs/{job_id}?since=0").json()
+        if patch["status"] != "running":
+            return patch
         time.sleep(0.05)
     raise AssertionError("job did not finish")
 
@@ -265,8 +266,8 @@ def test_http_annotate_job_then_edit_and_prototype(client):
     page = http.get("/api/books/demo/prototype/index.html")
     assert page.status_code == 200 and "<html" in page.text
     # 第二個任務不能和仍在執行的任務重疊；跑完之後可以再開
-    active = http.get("/api/jobs/active").json()["job"]
-    assert active["status"] == "done" and active["items"][0]["status"] == "done" and active["items"][0]["note"] == "1 scenes"
+    active = http.get("/api/books/demo/jobs/active").json()["job"]
+    assert active["status"] == "done" and active["items"][0]["state"] == "done" and active["items"][0]["note"] == "1 scenes"
 
 
 def test_http_job_requires_llm_key(tmp_path):
@@ -296,8 +297,8 @@ def test_job_reports_progress_and_streams(tmp_path):
     http = TestClient(create_app(config, llm_factory=lambda: ReplayLLM([json.dumps(sample_ops(None), ensure_ascii=False)])),
                       base_url="http://127.0.0.1:7866")
     job = wait_job(http, http.post("/api/books/demo/jobs", json={"kind": "annotate", "chapters": [1]}).json()["id"])
-    assert job["current"]["phase"] == "finished" and job["elapsed"] >= 0
-    assert job["current"]["chars"] > 0  # 串流字數有回報
+    assert job["status"] == "done" and job["ended_at"] >= job["started_at"]
+    assert sum(len(part.get("text", "")) for part in job["stream"]) > 0  # 串流有回報
 
 
 def test_job_can_be_stopped_mid_call(tmp_path):
@@ -322,9 +323,9 @@ def test_job_can_be_stopped_mid_call(tmp_path):
     http = TestClient(create_app(config, llm_factory=lambda: slow), base_url="http://127.0.0.1:7866")
     job_id = http.post("/api/books/demo/jobs", json={"kind": "annotate", "chapters": [1, 2]}).json()["id"]
     assert started.wait(2)
-    http.post(f"/api/jobs/{job_id}/stop")
+    http.post(f"/api/fe-jobs/{job_id}/stop")
     job = wait_job(http, job_id)
-    assert job["status"] == "stopped" and job["items"][0]["status"] == "stopped" and job["items"][1]["status"] == "pending"
+    assert job["status"] == "stopped" and job["items"][0]["state"] == "stopped" and job["items"][1]["state"] == "pending"
 
 
 def test_settings_roundtrip_and_validation(tmp_path):
@@ -360,6 +361,41 @@ def test_settings_roundtrip_and_validation(tmp_path):
     assert http.put("/api/settings", json={"paths": {"book_library": str(tmp_path / "nope")}}).status_code == 400
     assert http.put("/api/settings", json={"server": {"port": 80}}).status_code == 400
 
+
+def test_settings_comfyui_profiles_roundtrip_with_presets(tmp_path):
+    # QQ：profiles（含 presets）是漫畫與 VN 共用的正本；存檔後重新載入仍在，改一列不會洗掉 models。
+    project = tmp_path / "proj"
+    project.mkdir()
+    library = tmp_path / "lib"
+    library.mkdir()
+    cfg = project / "config.yaml"
+    cfg.write_text(f"project_root: {json.dumps(str(project))}\nbook_library:\n  path: {json.dumps(str(library))}\n  access: read_only\n", encoding="utf-8")
+    from t2vn.config import load_config
+
+    config = load_config(cfg)
+    http = TestClient(create_app(config, llm_factory=lambda: ReplayLLM([]), config_path=cfg, port=7866), base_url="http://127.0.0.1:7866")
+    body = {"comfyui": {"base_url": "http://127.0.0.1:9999", "default_profile": "moss",
+                        "profiles": {"moss": {"kind": "moss", "models": {"unet": "u", "clip": "c", "vae": "v"},
+                                              "default_preset": "final",
+                                              "presets": {"final": {"steps": 25, "cfg": 2.5, "sampler": "er_sde", "scheduler": "simple"},
+                                                          "draft": {"steps": 4, "cfg": 1.0, "sampler": "euler"}}}}}}
+    saved = http.put("/api/settings", json=body).json()
+    assert saved["comfyui"]["default_profile"] == "moss"
+    reloaded = load_config(cfg)
+    assert reloaded.comfyui_base_url == "http://127.0.0.1:9999"
+    assert reloaded.comfy_profiles["moss"]["presets"]["final"]["steps"] == 25
+    assert reloaded.comfy_profiles["moss"]["presets"]["draft"]["sampler"] == "euler"
+    assert reloaded.comfy_profiles["moss"]["default_preset"] == "final"
+    # presets 整份取代（介面一次送整組，這樣「刪除列」才有效）；models 是合併，不會被洗掉；default_preset 失效會自動清空
+    http.put("/api/settings", json={"comfyui": {"profiles": {"moss": {"presets": {"turbo": {"steps": 4, "cfg": 1.0}}}}}})
+    again = load_config(cfg)
+    assert again.comfy_profiles["moss"]["presets"]["turbo"]["steps"] == 4
+    assert "final" not in again.comfy_profiles["moss"]["presets"]   # 整份取代，所以舊的被換掉
+    assert again.comfy_profiles["moss"]["models"]["unet"] == "u"    # models 仍是合併
+    assert again.comfy_profiles["moss"]["default_preset"] == ""      # 舊 preset 被換掉 → 自動清空，不是留著指向不存在的名字
+    # 不合法的 kind 不會寫進檔案
+    assert http.put("/api/settings", json={"comfyui": {"profiles": {"bad": {"kind": "sdxl"}}}}).status_code == 400
+    assert "bad" not in load_config(cfg).comfy_profiles
 
 def test_settings_never_returns_key_and_requires_provider(tmp_path):
     config, studio = imported(tmp_path)

@@ -297,3 +297,20 @@ def test_draft_card_retries_when_both_prompts_empty():
     assert card["headshot_prompt"].startswith("long hair")
     with pytest.raises(m.ArtCardsError):
         m.draft_card("minor", {}, [], LIB, None, lambda p: '{"headshot_prompt": "", "sprite_prompt": ""}', retries=1)
+
+# ---------------------------------------------------------------- t2c 子物件（D26）
+
+def test_save_card_keeps_t2c_when_payload_omits_it(work):
+    first = m.save_card(ok, work, "ellie", {"headshot_prompt": "long black hair",
+                                           "t2c": {"sections": {"head": ["a 17-year-old girl"]}}})
+    assert first["t2c"]["sections"]["head"] == ["a 17-year-old girl"]
+    second = m.save_card(ok, work, "ellie", {"headshot_prompt": "long black hair"})
+    assert second["t2c"]["sections"]["head"] == ["a 17-year-old girl"]
+    on_disk = json.loads((work / "art" / "appearance" / "ellie.json").read_text(encoding="utf-8"))
+    assert on_disk["t2c"]["sections"]["head"] == ["a 17-year-old girl"]
+
+
+def test_save_card_explicit_t2c_replaces(work):
+    m.save_card(ok, work, "ellie", {"t2c": {"sections": {"head": ["a girl"]}}})
+    card = m.save_card(ok, work, "ellie", {"t2c": {"sections": {"head": ["a woman"]}}})
+    assert card["t2c"]["sections"]["head"] == ["a woman"]

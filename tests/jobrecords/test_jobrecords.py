@@ -8,7 +8,9 @@ from t2vn.jobrecords import list_records, load_record, prune_records, save_recor
 
 def rec(job_id="a1b2c3", kind="annotate", started=1000.0, status="done", log=None, **extra):
     base = {"id": job_id, "book_id": "demo", "kind": kind, "status": status, "started": started, "ended": started + 5.5 if isinstance(started, (int, float)) else None,
-            "chapters": [1, 2], "items": [{"no": 1, "status": "ok", "note": ""}, {"no": 2, "status": "error", "note": "bad"}],
+            "chapters": [1, 2],
+            "items": [{"key": "ch001", "label": "第 1 章", "state": "done", "note": ""},
+                      {"key": "ch002", "label": "第 2 章", "state": "error", "note": "bad"}],
             "tokens": 1234, "log": log if log is not None else ["line one", "第二行"], "summary": {"failed": 1}}
     base.update(extra)
     return base
@@ -21,6 +23,16 @@ def test_save_and_load_roundtrip(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "第二行" in text and text.endswith("\n")           # ensure_ascii=False
     assert list((tmp_path / "_jobs").glob("*.tmp")) == []      # 不留暫存檔
+
+
+def test_legacy_items_are_normalized_on_load(tmp_path):
+    """P4 之前寫在磁碟上的 items 是 {no,status,note}；讀出來要是 fekit 形狀。"""
+    save_record(tmp_path, rec(items=[{"no": 1, "status": "done", "note": ""},
+                                     {"no": 2, "status": "stopped", "note": "bye"}]))
+    assert load_record(tmp_path, "a1b2c3")["items"] == [
+        {"key": "ch001", "label": "第 1 章", "state": "done", "note": ""},
+        {"key": "ch002", "label": "第 2 章", "state": "stopped", "note": "bye"},
+    ]
 
 
 def test_save_overwrites_same_id(tmp_path):
@@ -43,12 +55,28 @@ def test_load_missing_returns_none(tmp_path):
     assert load_record(tmp_path, "broken1") is None            # 壞檔當作沒有
 
 
+def test_uuid_style_id_is_accepted(tmp_path):
+    """P1 之前的紀錄 id 是 uuid 十六進位（開頭可能是數字）；那些檔案必須還打得開。"""
+    save_record(tmp_path, rec(job_id="930fb90d44"))
+    assert load_record(tmp_path, "930fb90d44")["id"] == "930fb90d44"
+    assert list_records(tmp_path)[0]["id"] == "930fb90d44"
+
+
 @pytest.mark.parametrize("bad", ["", "../x", "a/b", "A1", "a b", "x.json", "a" * 41])
 def test_bad_ids_are_rejected(tmp_path, bad):
     with pytest.raises(ValueError):
         load_record(tmp_path, bad)
     with pytest.raises(ValueError):
         save_record(tmp_path, rec(job_id=bad))
+
+
+def test_fekit_style_id_with_underscores_is_accepted(tmp_path):
+    """fekit 的任務 id 是 j_YYYYMMDD_NNNN_xxxx（有底線），P1 之後要能存。"""
+    job_id = "j_20261105_0001_ab12"
+    path = save_record(tmp_path, rec(job_id=job_id))
+    assert path == tmp_path / "_jobs" / f"{job_id}.json"
+    assert load_record(tmp_path, job_id)["id"] == job_id
+    assert list_records(tmp_path)[0]["id"] == job_id
 
 
 @pytest.mark.parametrize("field", ["id", "book_id", "kind", "status", "started"])

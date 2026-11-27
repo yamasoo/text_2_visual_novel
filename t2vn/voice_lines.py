@@ -146,9 +146,10 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(config: Any, path: Path, data: Any) -> None:
+    from .atomic import write_atomic
+
     config.assert_writable(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def load_scene_docs(work: Path) -> list[dict[str, Any]]:
@@ -319,8 +320,11 @@ def validate_cast_voice(doc: dict[str, Any] | None, work: Path, cast_doc: dict[s
     if doc.get("engine") not in (None, *ENGINES):
         errors.append(f"engine is not supported: {doc.get('engine')!r}")
     characters = doc.get("characters")
-    if not isinstance(characters, dict) or not characters:
-        errors.append("characters must be a non-empty object")
+    if not isinstance(characters, dict):
+        errors.append("characters must be an object")
+        return errors
+    if not characters:
+        # 空的是合法中繼狀態：剛建立的書（先寫最小檔）、或只套用模型還沒配 speaker_id。
         return errors
     known = (cast_doc or {}).get("characters") or {}
     for char_id, spec in characters.items():

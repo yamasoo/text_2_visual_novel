@@ -1,0 +1,332 @@
+{
+  "ops": {
+    "scenes": [
+      {
+        "title": "天台的便當",
+        "location": "rooftop",
+        "setting_en": "The rooftop of a school club building at noon; a water tank casts a hard shadow.",
+        "cast": [
+          {
+            "id": "lin",
+            "expression": "annoyed"
+          },
+          {
+            "id": "hao",
+            "expression": "out of breath"
+          }
+        ],
+        "ops": [
+          {
+            "k": "N",
+            "p": 1
+          },
+          {
+            "k": "n",
+            "p": 2,
+            "t": "林曉雨一個人坐在社辦大樓頂樓的水塔陰影下"
+          },
+          {
+            "k": "d",
+            "p": 3,
+            "s": "lin",
+            "m": "小聲",
+            "t": "「……又不接。」"
+          },
+          {
+            "k": "x",
+            "shot": "wide",
+            "angle": "high",
+            "note": "An empty rooftop under the noon sun."
+          },
+          {
+            "k": "N",
+            "p": 4
+          },
+          {
+            "k": "d",
+            "p": 5,
+            "s": "hao",
+            "t": "「對不起！排隊排到一半，被教授抓去搬東西！」"
+          },
+          {
+            "k": "N",
+            "p": 6
+          },
+          {
+            "k": "d",
+            "p": 7,
+            "s": "lin",
+            "t": "「我已經不餓了。」"
+          },
+          {
+            "k": "N",
+            "p": 8
+          },
+          {
+            "k": "d",
+            "p": 9,
+            "s": "hao",
+            "t": "「妳上次說的，不要香菜。」"
+          },
+          {
+            "k": "N",
+            "p": 10
+          }
+        ]
+      }
+    ]
+  },
+  "plan": {
+    "title": "遲到的便當",
+    "unlisted_characters": [],
+    "pages": [
+      {
+        "page": 1,
+        "template": "5a",
+        "purpose": "交代天台的等待，再讓便當遲到地出現",
+        "panels": [
+          {
+            "slot": 1,
+            "beat": "頂樓全景，曉雨坐在水塔陰影下聽電話",
+            "characters": [
+              "lin"
+            ],
+            "source": "十二點四十分"
+          },
+          {
+            "slot": 2,
+            "beat": "手機螢幕特寫：未接來電 3",
+            "source": "未接來電 3"
+          },
+          {
+            "slot": 3,
+            "beat": "鐵門被撞開，阿浩舉著兩個便當衝進來",
+            "characters": [
+              "hao"
+            ],
+            "source": "對不起！排隊排到一半"
+          },
+          {
+            "slot": 4,
+            "beat": "曉雨抱胸別過頭",
+            "characters": [
+              "lin"
+            ],
+            "source": "我已經不餓了"
+          },
+          {
+            "slot": 5,
+            "beat": "阿浩遞出便當，紙條寫著不要香菜",
+            "characters": [
+              "hao"
+            ],
+            "source": "妳上次說的，不要香菜"
+          }
+        ]
+      }
+    ]
+  },
+  "script": "## 第 1 頁（模板 5a：上二、中一、下二）\n\n**1 格**｜遠景、俯視｜頂樓全景，曉雨一個人坐在水塔陰影下，手機貼在耳邊。\n- 旁白：十二點四十分。\n- 曉雨：……又不接。\n\n**2 格**｜特寫｜曉雨的手機螢幕：「未接來電 3」。曉雨皺眉。\n- （無台詞）\n\n**3 格**｜中景、平視｜鐵門被撞開，阿浩衝進來，氣喘吁吁，手上舉著兩個便當。\n- 狀聲詞：碰！\n- 阿浩：對不起！排隊排到一半被教授抓去搬東西！\n\n**4 格**｜中景｜曉雨雙手抱胸，別過頭。\n- 曉雨：我已經不餓了。\n\n**5 格**｜近景｜阿浩把其中一個便當遞過去，便當上貼著手寫紙條「不要香菜」。曉雨偷看紙條，耳朵有點紅。\n- 阿浩：妳上次說的，不要香菜。\n- 曉雨（心聲）：……記得這種事幹嘛。",
+  "storyboard": {
+    "panels": [
+      {
+        "slot": 1,
+        "id": "p001_k1",
+        "shot": "extreme_wide",
+        "angle": "high",
+        "location": "rooftop",
+        "scene": "Noon sunlight on an empty rooftop. A young woman sits alone on the ground in the shadow of a water tank, holding a phone to her ear.",
+        "characters": [
+          {
+            "id": "lin",
+            "pose": "Sitting on the ground with her knees up, holding a phone to her ear",
+            "expression": "Annoyed",
+            "box": [
+              0.55,
+              0.45,
+              0.8,
+              0.9
+            ]
+          }
+        ],
+        "bubbles": [
+          {
+            "kind": "narration",
+            "text": "十二點四十分。",
+            "anchor": [
+              0.9,
+              0.1
+            ]
+          },
+          {
+            "kind": "speech",
+            "speaker": "lin",
+            "text": "……又不接。",
+            "anchor": [
+              0.5,
+              0.35
+            ]
+          }
+        ]
+      },
+      {
+        "slot": 2,
+        "id": "p001_k2",
+        "shot": "extreme_close",
+        "angle": "eye",
+        "scene": "Close-up of a smartphone screen held in one hand, the screen glowing, showing a missed-call notification icon.",
+        "characters": [],
+        "objects": [
+          {
+            "caption": "A smartphone held in one hand, screen facing the viewer",
+            "box": [
+              0.15,
+              0.1,
+              0.85,
+              0.95
+            ]
+          }
+        ],
+        "bubbles": []
+      },
+      {
+        "slot": 3,
+        "id": "p001_k3",
+        "shot": "medium",
+        "angle": "eye",
+        "location": "rooftop",
+        "scene": "A metal rooftop door bursts open. A young man rushes through it, out of breath, raising two lunch boxes high in one hand.",
+        "characters": [
+          {
+            "id": "hao",
+            "pose": "Running forward through an open metal door, one arm raised holding two stacked lunch boxes",
+            "expression": "Panicked and apologetic",
+            "box": [
+              0.3,
+              0.05,
+              0.7,
+              1
+            ]
+          }
+        ],
+        "sfx": [
+          {
+            "text": "碰！",
+            "box": [
+              0.75,
+              0.05,
+              0.98,
+              0.4
+            ]
+          }
+        ],
+        "bubbles": [
+          {
+            "kind": "shout",
+            "speaker": "hao",
+            "text": "對不起！\n排隊排到一半\n被教授抓去搬東西！",
+            "anchor": [
+              0.12,
+              0.2
+            ]
+          }
+        ]
+      },
+      {
+        "slot": 4,
+        "id": "p001_k4",
+        "shot": "medium",
+        "angle": "eye",
+        "location": "rooftop",
+        "scene": "The young woman sits with her arms crossed, turning her face away to the side in a sulk.",
+        "characters": [
+          {
+            "id": "lin",
+            "pose": "Sitting with arms crossed, head turned away to the side",
+            "expression": "Sulking",
+            "box": [
+              0.2,
+              0.15,
+              0.8,
+              1
+            ]
+          }
+        ],
+        "bubbles": [
+          {
+            "kind": "speech",
+            "speaker": "lin",
+            "text": "我已經不餓了。",
+            "anchor": [
+              0.85,
+              0.15
+            ]
+          }
+        ]
+      },
+      {
+        "slot": 5,
+        "id": "p001_k5",
+        "shot": "close",
+        "angle": "over_shoulder",
+        "location": "rooftop",
+        "scene": "The young man holds out a lunch box toward the young woman. A small handwritten paper note is taped on the lid. She glances at the note, her ears slightly red.",
+        "characters": [
+          {
+            "id": "hao",
+            "pose": "Seen from behind over his shoulder, holding out a lunch box with both hands",
+            "expression": "Gentle",
+            "box": [
+              0.55,
+              0.1,
+              1,
+              1
+            ]
+          },
+          {
+            "id": "lin",
+            "pose": "Sitting, glancing sideways at the lunch box",
+            "expression": "Embarrassed, blushing slightly",
+            "box": [
+              0,
+              0.15,
+              0.5,
+              1
+            ]
+          }
+        ],
+        "objects": [
+          {
+            "caption": "A plastic lunch box with a small paper note taped on the lid",
+            "box": [
+              0.35,
+              0.45,
+              0.65,
+              0.75
+            ]
+          }
+        ],
+        "bubbles": [
+          {
+            "kind": "speech",
+            "speaker": "hao",
+            "text": "妳上次說的，不要香菜。",
+            "anchor": [
+              0.85,
+              0.08
+            ]
+          },
+          {
+            "kind": "thought",
+            "speaker": "lin",
+            "text": "……記得\n這種事幹嘛。",
+            "anchor": [
+              0.12,
+              0.08
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

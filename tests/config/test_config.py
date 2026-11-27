@@ -121,3 +121,54 @@ def test_init_config_output_is_loadable(tmp_path):
     config = load_config(dest)
     assert config.project_root == project
     assert config.book_library == library
+
+
+def _base_config(tmp_path, name="p", **comfyui):
+    # 每個案例用不同的子資料夾：make() 會建 proj/，同一個路徑不能建兩次。
+    base = tmp_path / name
+    base.mkdir(parents=True, exist_ok=True)
+    cfg, _root = make(base, comfyui={"base_url": "http://127.0.0.1:8188", **comfyui})
+    return cfg
+
+
+def test_comfyui_profiles_parse_and_default_must_exist(tmp_path):
+    # QQ-1：profiles 是正本（VN 與漫畫共用）；沒寫就是空字典，呼叫端各自 fallback。
+    cfg = _base_config(tmp_path, "ok", profiles={"moss": {"kind": "moss",
+                                                     "models": {"unet": "u", "clip": "c", "vae": "v"},
+                                                     "negative": "nsfw", "presets": {"final": {"steps": 25}}}},
+                           default_profile="moss")
+    assert list(cfg.comfy_profiles) == ["moss"] and cfg.comfy_default_profile == "moss"
+    assert cfg.comfy_profiles["moss"]["kind"] == "moss"
+    assert cfg.comfy_profiles["moss"]["models"]["unet"] == "u"
+    assert cfg.comfy_profiles["moss"]["presets"]["final"]["steps"] == 25
+    assert _base_config(tmp_path, "empty").comfy_profiles == {}
+    with pytest.raises(ConfigError, match="kind"):
+        _base_config(tmp_path, "bad-kind", profiles={"bad": {"kind": "sdxl"}})
+    with pytest.raises(ConfigError, match="default_preset"):
+        _base_config(tmp_path, "bad-preset", profiles={"moss": {"kind": "moss", "presets": {"turbo": {"steps": 4}}, "default_preset": "final"}}, default_profile="moss")
+    with pytest.raises(ConfigError, match="default_profile"):
+        _base_config(tmp_path, "bad-default", profiles={"moss": {"kind": "moss"}}, default_profile="nope")
+
+
+def test_comfyui_profile_loras_parse_and_validate(tmp_path):
+    cfg = _base_config(
+        tmp_path, "loras-ok",
+        profiles={"anima": {
+            "kind": "anima",
+            "loras": [
+                {"name": "style\\watercolor.safetensors", "strength": 0.75, "on": True, "trigger": "watercolor style"},
+                {"name": "detail.safetensors", "on": False},
+            ],
+        }},
+        default_profile="anima",
+    )
+    loras = cfg.comfy_profiles["anima"]["loras"]
+    assert len(loras) == 2
+    assert loras[0] == {"name": "style\\watercolor.safetensors", "strength": 0.75, "on": True, "trigger": "watercolor style"}
+    assert loras[1] == {"name": "detail.safetensors", "strength": 1.0, "on": False, "trigger": ""}
+    with pytest.raises(ConfigError, match="沒有 name"):
+        _base_config(tmp_path, "loras-empty", profiles={"anima": {"kind": "anima", "loras": [{"name": ""}]}})
+    with pytest.raises(ConfigError, match="strength"):
+        _base_config(tmp_path, "loras-bad-str", profiles={"anima": {"kind": "anima", "loras": [{"name": "a.safetensors", "strength": "high"}]}})
+    with pytest.raises(ConfigError, match="on"):
+        _base_config(tmp_path, "loras-bad-on", profiles={"anima": {"kind": "anima", "loras": [{"name": "a.safetensors", "on": "yes"}]}})

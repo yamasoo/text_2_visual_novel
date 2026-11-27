@@ -257,3 +257,128 @@ def test_vendor_backend_submit_includes_widget_idx_map(monkeypatch):
     images = backend.run(({"1": {"class_type": "X", "inputs": {}}}, "9"), lambda: False)
     assert images == [b"PNGDATA"] and sent[0]["extra_data"]["extra_pnginfo"]["workflow"] == {"nodes": [], "widget_idx_map": {}}
     assert comfy.submit is original  # 用完還原
+
+
+def test_resolve_profile_kind_picks_the_right_model_family():
+    # MM-2：出圖模型由 art.comfy.kind 決定；沒寫就是 anima（舊專案相容）。
+    moss = Fake(lists={"unet": ["moss_image_sft_int8_convrot.safetensors"],
+                       "clip": ["qwen3.5_9b_w4a8_gptq.safetensors"],
+                       "vae": ["flux2-vae_small.safetensors"], "lora": []})
+    profile = resolve_profile(moss, {"comfy": {"kind": "moss"}})
+    assert profile["kind"] == "moss"
+    assert profile["unet"].startswith("moss_image")
+    assert profile["clip"].startswith("qwen3.5") and profile["vae"].startswith("flux2-vae")
+    assert resolve_profile(Fake(), {})["kind"] == "anima"
+    with pytest.raises(ArtGenError, match="不認得"):
+        resolve_profile(Fake(), {"comfy": {"kind": "sdxl"}})
+
+
+def test_vendor_backend_switches_workflow_by_kind():
+    # 兩支 workflow 只差一個節點：moss 用 EmptyFlux2LatentImage，anima 用 EmptySD3LatentImage（並多 ModelSamplingAuraFlow）。
+    backend = art_gen.VendorBackend("http://127.0.0.1:1")
+    half = {"unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors", "loras": []}
+    moss_wf, _ = backend.prepare({**half, "kind": "moss"}, "a man at the harbour", "", 7, 768, 1344)
+    moss_classes = {n["class_type"] for n in moss_wf.values()}
+    assert "EmptyFlux2LatentImage" in moss_classes and "EmptySD3LatentImage" not in moss_classes
+    assert "UNETLoader" in moss_classes
+    anima_wf, _ = backend.prepare({**half, "kind": "anima"}, "1girl, solo", "bad", 7, 768, 1344)
+    assert "EmptySD3LatentImage" in {n["class_type"] for n in anima_wf.values()}
+
+
+class FakeConfig:
+    def __init__(self, profiles, default=""):
+        self.comfy_profiles = profiles
+        self.comfy_default_profile = default
+
+
+def test_resolve_profile_prefers_host_profile_models():
+    # QQ-3：這本書選了 profile 就用宿主那份的模型與 kind，不再看三個檔名字串。
+    host = FakeConfig({"moss": {"kind": "moss", "workflow": "",
+                       "models": {"unet": "from-host.safetensors", "clip": "host-clip.safetensors", "vae": "host-vae.safetensors"},
+                       "negative": "", "presets": {}}}, default="moss")
+    profile = resolve_profile(Fake(), {"comfy": {"profile": "moss"}}, host)
+    assert profile["kind"] == "moss" and profile["profile"] == "moss"
+    assert (profile["unet"], profile["clip"], profile["vae"]) == ("from-host.safetensors", "host-clip.safetensors", "host-vae.safetensors")
+    with pytest.raises(ArtGenError, match="找不到出圖 profile"):
+        resolve_profile(Fake(), {"comfy": {"profile": "nope"}}, host)
+    # 沒選 profile 時跟隨設定頁的預設 profile（使用者 2026-11-12 指示；原 D33 是不跟隨）
+    inherited = resolve_profile(Fake(), {}, host)
+    assert inherited["kind"] == "moss" and inherited["profile"] == "moss"
+    assert inherited["unet"] == "from-host.safetensors"
+    # 連設定頁都沒有預設 profile 時才走相容路徑
+    assert resolve_profile(Fake(), {}, FakeConfig({}))["kind"] == "anima"
+
+
+def test_describe_profile_reports_what_will_be_used():
+    # 介面要知道「這本書實際會用哪一組」：選了 profile／走相容路徑／選了但設定頁沒有。
+    host = FakeConfig({"moss": {"kind": "moss",
+                       "models": {"unet": "u.safetensors", "clip": "", "vae": "v.safetensors"},
+                       "negative": "", "presets": {}, "default_preset": "final"}})
+    picked = art_gen.describe_profile({"comfy": {"profile": "moss"}}, host)
+    assert picked["source"] == "profile" and picked["profile"] == "moss" and picked["kind"] == "moss"
+    assert picked["models"]["unet"] == "u.safetensors" and picked["auto"] == ["clip"]
+    assert picked["preset"] == "final"
+    legacy = art_gen.describe_profile({}, host)
+    assert legacy["source"] == "legacy" and legacy["kind"] == "anima" and legacy["profile"] == ""
+    missing = art_gen.describe_profile({"comfy": {"profile": "nope"}}, host)
+    assert missing["source"] == "missing" and "沒有" in missing["message"]
+
+
+def test_describe_profile_warns_when_kind_and_models_disagree():
+    # 實測踩到：profile 叫 moss、kind 卻是 anima（模型是 MOSS 的）→ 會用 Anima 的 workflow 載 MOSS 模型。
+    bad = FakeConfig({"moss": {"kind": "anima",
+                      "models": {"unet": "moss_image_sft_int8_convrot.safetensors", "clip": "c", "vae": "v"},
+                      "negative": "", "presets": {}}})
+    info = art_gen.describe_profile({"comfy": {"profile": "moss"}}, bad)
+    assert "kind 是 anima" in info["message"] and "moss" in info["message"]
+    ok = FakeConfig({"moss": {"kind": "moss",
+                     "models": {"unet": "moss_image_sft_int8_convrot.safetensors", "clip": "c", "vae": "v"},
+                     "negative": "", "presets": {}}})
+    assert art_gen.describe_profile({"comfy": {"profile": "moss"}}, ok)["message"] == ""
+    worse = FakeConfig({"x": {"kind": "moss", "models": {"unet": "UnstableAnima-Art-V4.safetensors"},
+                        "negative": "", "presets": {}}})
+    assert "Anima 的模型檔" in art_gen.describe_profile({"comfy": {"profile": "x"}}, worse)["message"]
+
+
+def test_vendor_backend_applies_profile_preset_and_lora():
+    # 使用者實測：VN 出圖一直是 25 步（workflow 內建），因為 novel_studio 的 prepare() 不碰取樣參數。
+    host = FakeConfig({"moss": {"kind": "moss", "workflow": "",
+                       "models": {"unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors"},
+                       "negative": "", "default_preset": "turbo",
+                       "presets": {"turbo": {"steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+                                             "lora": "ANIMA\\x.safetensors", "lora_strength": 1.0}}}})
+    profile = resolve_profile(Fake(), {"comfy": {"profile": "moss"}}, host)
+    assert profile["preset_name"] == "turbo" and profile["preset"]["steps"] == 4
+    backend = art_gen.VendorBackend("http://127.0.0.1:1")
+    wf, _ = backend.prepare(profile, "1girl, solo", "bad", 7, 768, 1344)
+    sampler = next(n for n in wf.values() if n["class_type"].startswith("KSampler"))
+    assert sampler["inputs"]["steps"] == 4 and sampler["inputs"]["cfg"] == 1.0
+    assert sampler["inputs"]["sampler_name"] == "euler" and sampler["inputs"]["scheduler"] == "simple"
+    loras = [n for n in wf.values() if n["class_type"] == "LoraLoaderModelOnly"]
+    assert loras and loras[0]["inputs"]["lora_name"] == "ANIMA\\x.safetensors"
+
+
+def test_vendor_backend_chains_preset_lora_and_profile_loras_with_triggers():
+    host = FakeConfig({"moss": {
+        "kind": "moss", "workflow": "",
+        "models": {"unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors"},
+        "negative": "", "default_preset": "turbo",
+        "presets": {"turbo": {"steps": 4, "cfg": 1.0, "lora": "fast_4step.safetensors", "lora_strength": 1.0}},
+        "loras": [
+            {"name": "style_ink.safetensors", "strength": 0.7, "on": True, "trigger": "ink wash"},
+            {"name": "disabled.safetensors", "strength": 0.5, "on": False, "trigger": "should_not_appear"},
+            {"name": "detail_v2.safetensors", "strength": 0.4, "on": True, "trigger": "fine lines"},
+        ],
+    }})
+    profile = resolve_profile(Fake(), {"comfy": {"profile": "moss"}}, host)
+    backend = art_gen.VendorBackend("http://127.0.0.1:1")
+    wf, _ = backend.prepare(profile, "1girl, solo", "bad", 7, 768, 1344)
+    lora_nodes = [n for n in wf.values() if n["class_type"] == "LoraLoaderModelOnly"]
+    assert [n["inputs"]["lora_name"] for n in lora_nodes] == [
+        "fast_4step.safetensors",
+        "style_ink.safetensors",
+        "detail_v2.safetensors",
+    ]
+    assert [n["inputs"]["strength_model"] for n in lora_nodes] == [1.0, 0.7, 0.4]
+    texts = [n["inputs"].get("text", "") for n in wf.values() if n["class_type"] == "CLIPTextEncode"]
+    assert any("ink wash" in t and "fine lines" in t and "should_not_appear" not in t for t in texts)
