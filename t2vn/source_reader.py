@@ -82,8 +82,39 @@ class Glossary:
 # ---------------------------------------------------------------- 低階解析
 
 
+def detect_layout(book_dir: str | Path, field_map: dict[str, Any] | None = None) -> str:
+    """偵測來源書目錄是 novel-studio v3（英文目錄／book.json）還是 v2（中文目錄）。"""
+    fm = field_map or load_field_map()
+    root = Path(book_dir)
+    v3_paths = fm.get("v3_source_paths") or {}
+    v3_text = v3_paths.get("chapter_text_dir")
+    if (root / "book.json").is_file() or (v3_text and (root / v3_text).is_dir()):
+        return "v3"
+    return "v2"
+
+
+def source_paths_for(book_dir: str | Path, field_map: dict[str, Any] | None = None) -> dict[str, str]:
+    """依書目錄版本回傳對應的相對路徑表（v3 或 v2）。"""
+    fm = field_map or load_field_map()
+    if detect_layout(book_dir, fm) == "v3" and isinstance(fm.get("v3_source_paths"), dict):
+        return fm["v3_source_paths"]
+    return fm["source_paths"]
+
+
+def read_book_meta(book_dir: str | Path) -> dict[str, Any]:
+    """讀 novel-studio v3 的 ``book.json``；沒有或讀不到回傳空 dict。"""
+    path = Path(book_dir) / "book.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def split_frontmatter(text: str, where: str) -> tuple[dict[str, str], str]:
-    """切出 frontmatter（單層 ``key: value``）與正文。沒有 frontmatter 丟 SourceError。"""
+    """切出 frontmatter（單層 ``key: value``，容錯全形冒號 ``：``）與正文。沒有 frontmatter 丟 SourceError。"""
     lines = text.lstrip("﻿").splitlines()
     if not lines or lines[0].strip() != "---":
         raise SourceError(f"{where}: missing frontmatter")
@@ -95,6 +126,8 @@ def split_frontmatter(text: str, where: str) -> tuple[dict[str, str], str]:
         if not line.strip():
             continue
         key, sep, value = line.partition(":")
+        if not sep:
+            key, sep, value = line.partition("：")
         if not sep:
             raise SourceError(f"{where}: malformed frontmatter line {index + 1}")
         meta[key.strip()] = value.strip()
@@ -208,12 +241,15 @@ def read_chapter_outline(path: str | Path, field_map: dict[str, Any] | None = No
 
 
 def read_all_outlines(book_dir: str | Path, field_map: dict[str, Any] | None = None) -> list[ChapterOutline]:
-    """讀全部章綱，依章號排序。檔名不符 ``chapter_outline_file_pattern`` 的檔案忽略。"""
+    """讀全部章綱，依章號排序。檔名不符章綱檔名格式的檔案忽略。"""
     fm = field_map or load_field_map()
-    directory = Path(book_dir) / fm["source_paths"]["chapter_outline_dir"]
+    layout = detect_layout(book_dir, fm)
+    paths = source_paths_for(book_dir, fm)
+    directory = Path(book_dir) / paths["chapter_outline_dir"]
     if not directory.is_dir():
         raise SourceError(f"chapter outline folder not found: {directory}")
-    pattern = re.compile(fm["chapter_outline_file_pattern"])
+    pat_str = fm.get("v3_chapter_outline_file_pattern") if layout == "v3" else fm["chapter_outline_file_pattern"]
+    pattern = re.compile(pat_str or fm["chapter_outline_file_pattern"])
     outlines = [read_chapter_outline(p, fm) for p in sorted(directory.iterdir()) if p.is_file() and pattern.match(p.name)]
     seen: dict[int, str] = {}
     for outline in outlines:
@@ -255,7 +291,8 @@ def read_character(path: str | Path, field_map: dict[str, Any] | None = None) ->
 def read_characters(book_dir: str | Path, field_map: dict[str, Any] | None = None) -> list[CharacterCard]:
     """讀全部角色卡，依檔名排序。名稱重複丟 SourceError。"""
     fm = field_map or load_field_map()
-    directory = Path(book_dir) / fm["source_paths"]["character_dir"]
+    paths = source_paths_for(book_dir, fm)
+    directory = Path(book_dir) / paths["character_dir"]
     if not directory.is_dir():
         raise SourceError(f"character folder not found: {directory}")
     cards = [read_character(p, fm) for p in sorted(directory.glob("*.md"))]
@@ -273,7 +310,8 @@ def read_characters(book_dir: str | Path, field_map: dict[str, Any] | None = Non
 def read_glossary(book_dir: str | Path, field_map: dict[str, Any] | None = None) -> Glossary:
     """讀名詞表（Markdown 表格）。重複名詞不丟錯，列在 ``duplicates``，保留第一筆。"""
     fm = field_map or load_field_map()
-    path = Path(book_dir) / fm["source_paths"]["glossary_file"]
+    paths = source_paths_for(book_dir, fm)
+    path = Path(book_dir) / paths["glossary_file"]
     where = path.name
     meta_raw, body = split_frontmatter(_read(path), where)
     meta = map_frontmatter(meta_raw, fm["glossary_doc"], where)

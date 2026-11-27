@@ -31,6 +31,8 @@ SCHEMA_FILES = {
     "outline": "outline.schema.json",
     "cast_voice": "cast_voice.schema.json",
     "voice_map": "voice_map.schema.json",
+    "letters": "letters.schema.json",
+    "appearance_card": "appearance_card.schema.json",
 }
 
 PLAYER_ID = "player"
@@ -94,6 +96,8 @@ def guess_kind(path: str | Path) -> str | None:
             return "chapter_index"
         if _CHAPTER_FILE_RE.match(p.name):
             return "chapter"
+    if p.parent.name == "letters" and _CHAPTER_FILE_RE.match(p.name):
+        return "letters"
     return None
 
 

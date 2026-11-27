@@ -1,4 +1,4 @@
-# 執行期依賴
+﻿# 執行期依賴
 pyyaml>=6.0
 jsonschema>=4.20
 # 選用：存放 LLM 金鑰到系統 keyring（沿用 novel-studio 的做法）

@@ -18,7 +18,8 @@ def js():
 def test_page_registered(js):
     assert js.lstrip().startswith("/*")
     assert '"use strict"' in js
-    assert re.search(r"PAGES\.audio\s*=\s*async\s+function\s*\(\s*bookId", js)
+    # 頁面改由 fekit 註冊：路由字串 + ctx（原本是 PAGES.audio = async function (bookId)。）
+    assert re.search(r'FE\.PAGES\["book/:id/audio"\]\s*=\s*async\s*\(\s*ctx\s*\)', js)
     assert "crumbs(" in js and "音樂" in js
 
 
@@ -34,7 +35,8 @@ def test_no_hardcoded_host(js):
 
 def test_api_routes_used(js):
     assert "/art/audio" in js
-    for part in ("/file?path=", "/draft", "/prompt", "/generate", "/select", "/scan", "/art/status", "/api/jobs/", "/stop"):
+    # 任務端點改走 fekit 的 /api/fe-jobs，停止鈕改呼叫 tracker.stop()（原本打 /api/jobs/{id} 與 /api/jobs/{id}/stop）。
+    for part in ("/file?path=", "/draft", "/prompt", "/generate", "/select", "/scan", "/art/status", "/api/fe-jobs", "tracker.stop"):
         assert part in js, part
     assert "encodeURIComponent" in js
     assert re.search(r'method:\s*"PUT"', js)
@@ -43,7 +45,8 @@ def test_api_routes_used(js):
 def test_payloads(js):
     for key in ("only", "candidates", "regenerate", "asset_id", "style", "lyrics", "loop", "status", '"final"', "license"):
         assert key in js, key
-    assert "AiPanel.poll" in js and "AiPanel.executor" in js
+    # 任務掛載與模型挑選改走 fekit：AiPanel.poll → Panel.attach、AiPanel.executor → Executors.value。
+    assert "Panel.attach" in js and "Executors.value" in js
 
 
 def test_ui_labels(js):
@@ -60,7 +63,9 @@ def test_status_labels(js):
 
 
 def test_confirm_license_before_final(js):
-    assert "prompt(" in js
+    # 原生 prompt() 已移除，授權改由 fekit 的 ask() 取得，且確實寫進 final 的 payload。
+    assert re.search(r"const license\s*=\s*await\s+ask\(", js)
+    assert re.search(r'status:\s*"final",\s*license', js)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="沒有 node")

@@ -19,6 +19,7 @@ API 形狀（``read_settings`` 的回傳）：
 from __future__ import annotations
 
 import copy
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -66,8 +67,27 @@ def read_settings(config: Config, config_path: Path | None, running_port: int | 
         "paths": {"project_root": str(config.project_root), "works_dir": str(config.works_dir),
                   "works_dir_is_default": config.works_dir_override is None,
                   "book_library": str(config.book_library), "library_exists": config.book_library.is_dir()},
-        "comfyui": {"base_url": config.comfyui_base_url},
+        "comfyui": {"base_url": config.comfyui_base_url,
+                     "default_profile": config.comfy_default_profile,
+                     "profiles": config.comfy_profiles},
+        "tagcomplete": _tagcomplete_view(config),
+        "suite": {
+            "ns_url": os.environ.get("NS_URL", "").strip().rstrip("/"),
+            "suite_url": os.environ.get("SUITE_URL", "").strip().rstrip("/"),
+        },
         "server": {"port": config.server_port, "running_port": running_port},
+    }
+
+
+def _tagcomplete_view(config: Config) -> dict[str, Any]:
+    from . import tagcomplete
+
+    resolved_tag, resolved_zh = tagcomplete.resolve_dict_paths(config.tag_csv, config.tag_zh_csv, config.forge_dir)
+    return {
+        "tag_csv": config.tag_csv,
+        "tag_zh_csv": config.tag_zh_csv,
+        "forge_dir": config.forge_dir,
+        "resolved": {"tag_csv": resolved_tag, "tag_zh_csv": resolved_zh},
     }
 
 
@@ -141,10 +161,59 @@ def apply_settings(config_path: Path, changes: dict[str, Any]) -> Config:
             raw["works_dir"] = str(Path(value).expanduser())
         else:
             raw.pop("works_dir", None)
-    if (changes.get("comfyui") or {}).get("base_url"):
-        raw["comfyui"] = {**(raw.get("comfyui") or {}), "base_url": str(changes["comfyui"]["base_url"]).strip()}
+    comfy_changes = changes.get("comfyui") or {}
+    if comfy_changes:
+        section = dict(raw.get("comfyui") or {})
+        if "base_url" in comfy_changes:
+            section["base_url"] = str(comfy_changes["base_url"] or "").strip()
+        if "default_profile" in comfy_changes:
+            section["default_profile"] = str(comfy_changes["default_profile"] or "").strip()
+        profiles = dict(section.get("profiles") or {})
+        for name in comfy_changes.get("remove_profiles") or []:
+            profiles.pop(str(name), None)
+        for name, spec in (comfy_changes.get("profiles") or {}).items():
+            if not isinstance(spec, dict):
+                raise SettingsError("comfyui.profiles.%s must be a mapping" % name)
+            key = str(name)
+            old = dict(profiles.get(key) or {})
+            entry = dict(old)
+            entry.update(spec)
+            # models 合併（空字串＝自動挑，不刪鍵）；presets 與 loras 整份取代——介面一次送整組，
+            # 只有取代才刪得掉某一列，合併會讓「刪除列」看起來沒作用。
+            if isinstance(spec.get("models"), dict):
+                entry["models"] = dict(dict(old.get("models") or {}), **spec["models"])
+            if isinstance(spec.get("loras"), list):
+                entry["loras"] = [
+                    item for item in spec["loras"]
+                    if isinstance(item, dict) and str(item.get("name") or "").strip()
+                ]
+            profiles[key] = entry
+        # 換掉 presets 之後，原本的 default_preset 可能已經不存在：清成空字串（＝用 workflow 內建），
+        # 不要讓它變成「指向不存在的 preset」——那會讓之後的出圖整批失敗（2026-11-12 的實際案例）。
+        for name, entry in list(profiles.items()):
+            if not isinstance(entry, dict):
+                continue
+            presets = entry.get("presets") if isinstance(entry.get("presets"), dict) else {}
+            if entry.get("default_preset") and entry["default_preset"] not in presets:
+                entry["default_preset"] = ""
+        if profiles:
+            section["profiles"] = profiles
+        raw["comfyui"] = section
     if (changes.get("server") or {}).get("port"):
         raw["server"] = {**(raw.get("server") or {}), "port": int(changes["server"]["port"])}
+    if isinstance(changes.get("tagcomplete"), dict):
+        tc = dict(raw.get("tagcomplete") or {})
+        for key in ("tag_csv", "tag_zh_csv", "forge_dir"):
+            if key in changes["tagcomplete"]:
+                val = str(changes["tagcomplete"][key] or "").strip()
+                if val:
+                    tc[key] = val
+                else:
+                    tc.pop(key, None)
+        if tc:
+            raw["tagcomplete"] = tc
+        else:
+            raw.pop("tagcomplete", None)
 
     try:
         config = parse_config(raw, base_dir=config_path.parent)
@@ -156,9 +225,11 @@ def apply_settings(config_path: Path, changes: dict[str, Any]) -> Config:
     except OSError as exc:
         raise SettingsError(f"cannot create works folder {works}: {exc}") from exc
 
+    from .atomic import write_atomic
+
     backup = config_path.with_name(config_path.name + ".bak")
     shutil.copyfile(config_path, backup)
-    config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    write_atomic(config_path, yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
     return config
 
 

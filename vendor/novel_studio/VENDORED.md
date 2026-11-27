@@ -4,8 +4,8 @@
 
 ## 來源
 
-- 本機來源：`E:\novel-studio`，HEAD `c58af13ea0af0cc139ee1c847c0e539a8fd8e2e0`
-- 複製日期：2026-11-01
+- 本機來源：`E:\novel-studio`，HEAD `c58af13ea0af0cc139ee1c847c0e539a8fd8e2e0`（`providers.py` 於 2026-11-24 同步至 `fc29e6b722860ccc19cb00a468959bbbe4a86da2`）
+- 複製日期：2026-11-01（`providers.py`：2026-11-24）
 - 複製時比對：三個 `.py` 與 GitHub `yamasoo/novel-studio` 的內容完全相同（逐檔 `diff`）。本機工作目錄是否另有未提交的修改無法確認，但這三個檔案沒有差異。
 - 授權：MIT，`LICENSE` 一併保留。
 
@@ -14,7 +14,7 @@
 | 檔案 | 原路徑 | SHA-256 | 說明 | 修改 |
 |---|---|---|---|---|
 | `comfy.py` | `studio/comfy.py` | `6a7c6ea733144dcbfe384c629b5614bcfd16948c76c6cfd30063dded0f4d92ab` | ComfyUI API、workflow 分析與改寫、LoRA 注入 | 無 |
-| `providers.py` | `studio/providers.py` | `27c3949c9739c497dec77ea69b112a2bb5a51bf10d5174a3da9cd934fa85622c` | LLM provider 抽象（DeepSeek、llama.cpp、OpenAI 相容）、金鑰存取 | 無 |
+| `providers.py` | `studio/providers.py` | `7086a72c71c25e307f5c82ee4955a081347212665d60caaeaf02e7b92d976cb0` | LLM provider 抽象（DeepSeek、llama.cpp、OpenAI 相容、Google Gemini API）、金鑰存取（含 `.env`） | 無 |
 | `importer.py` | `studio/importer.py` | `2bc243c8b0860b711120d7c7fbe3e37d1ff9b43e223e4e3744e8c73ddac4a1d1` | 匯入舊稿：TXT／MD／docx 解碼、簡轉繁、依標題拆章、段落整理（本專案只用其純函式，不用 `commit`） | 無 |
 | `lang.py` | `studio/lang.py` | `854ac8e2d3115757567ad7bc48c3887ed4f218024303515e755e207e0b085f33` | 語言判斷、字數計算 | 無 |
 | `LICENSE` | `LICENSE` | `73c7f61ac81ffbd8d366b6ce7a7194cb064f2eb1b463324900c933d7a1bfd406` | MIT 授權 | 無 |

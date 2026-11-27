@@ -31,6 +31,7 @@
 ## 工作流程
 
 - 新對話開始時依序讀：本檔 → `docs/05_資料格式規格.md` → `docs/20_標註規則.md`。
+- 每段完成的最後回覆（報告）固定附交接資訊：下一步、是否換對話串、是否換分支、下一段的開場提示詞。
 - 專案技能原始檔在 `skills/`，安裝位置是 `.claude/skills/`（把 `skills/` 底下每個資料夾整個複製到 `.claude/skills/`）。
 - 金鑰只存系統 keyring（沿用 novel-studio 的 `KEYRING_SERVICE` 機制），不寫入 `config.yaml`、不進 git。
 - `config.yaml`、`build/`、`out/`、大型素材不進 git。

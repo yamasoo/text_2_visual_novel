@@ -87,7 +87,7 @@ def test_export_book_copies_only_referenced_voice(tmp_path):
     config, work = make_book(tmp_path)
     renpy = tmp_path / "rp"
     (renpy / "game").mkdir(parents=True)
-    export_book(config, "demo", [1], renpy)
+    export_book(config, "demo", [1], renpy, placeholders=True)
     game = renpy / "game"
     assert (game / "audio/voice/ch001/lao_zhang_ch001_sc01_l002.ogg").read_bytes() == b"OggS-voice"
     assert not (game / "audio/voice/ch001/orphan.ogg").exists()
@@ -101,7 +101,7 @@ def test_export_book_voice_false_skips_all_voice(tmp_path):
     config, work = make_book(tmp_path)
     renpy = tmp_path / "rp"
     (renpy / "game").mkdir(parents=True)
-    export_book(config, "demo", [1], renpy, voice=False)
+    export_book(config, "demo", [1], renpy, voice=False, placeholders=True)
     game = renpy / "game"
     assert not (game / "audio/voice").exists()
     assert "voice " not in (game / "vn_ch001.rpy").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-# 開發與驗收用
+﻿# 開發與驗收用
 -r requirements.txt
 pytest>=8
 httpx>=0.27   # FastAPI TestClient

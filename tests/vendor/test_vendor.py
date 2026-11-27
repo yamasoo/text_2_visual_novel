@@ -7,7 +7,7 @@ import pytest
 VENDOR = Path(__file__).resolve().parents[2] / "vendor"
 
 
-@pytest.mark.parametrize("name,count", [("novel_studio", 5), ("ruxi", 6)])
+@pytest.mark.parametrize("name,count", [("novel_studio", 5), ("ruxi", 6), ("t2c", 29)])
 def test_hashes_match_vendored_md(name, count):
     root = VENDOR / name
     table = (root / "VENDORED.md").read_text(encoding="utf-8")

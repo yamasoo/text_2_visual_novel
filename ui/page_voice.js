@@ -2,7 +2,6 @@
 (function () {
   "use strict";
 
-  const POLL_MS = 1500;
   const FLOW_TEXT =
     "流程：voice/cast_voice.json 設定每個角色的 sherpa-onnx speaker_id → 逐句生成（CPU，不需要 ComfyUI）→ " +
     "轉成 OGG 並寫入 VoiceMap.json → 重新匯出 Ren'Py 時自動加 voice 語句。";
@@ -23,14 +22,15 @@
     return badge(entry[0], entry[1]);
   }
 
-  async function render(bookId) {
+  async function render(bookId, ctx) {
+    const sig = ctx ? { signal: ctx.signal } : {};
     const base = `/api/books/${bookId}/tts`;
     const wrap = h("div");
     const body = h("div");
     const progress = h("div", { class: "card", hidden: true });
     const chapterFrom = h("input", { type: "number", min: 1, value: "1", style: "width:80px" });
     const chapterTo = h("input", { type: "number", min: 1, value: "1", style: "width:80px" });
-    let pollTimer = null;
+    let tracker = null;
 
     function chapterRange() {
       let start = Math.max(1, Number(chapterFrom.value) || 1);
@@ -44,7 +44,7 @@
     async function start(payload) {
       try {
         const job = await api(`${base}/generate`, { method: "POST", body: payload });
-        AiPanel.poll();
+        Panel.attach(job.id);
         watch(job.id);
       } catch (error) {
         fail(error);
@@ -53,63 +53,63 @@
 
     function watch(jobId) {
       progress.hidden = false;
-      if (pollTimer) clearTimeout(pollTimer);
-      const tick = async () => {
-        try {
-          const job = await api(`/api/jobs/${jobId}`);
-          const cur = job.current || {};
-          const running = job.status === "running";
-          const title = running
-            ? "生成中"
-            : ({ done: "生成完成", stopped: "已停止", error: "結束（有錯誤）" }[job.status] || job.status);
-          const percent = cur.total ? Math.round((100 * ((cur.index || 1) - 1)) / cur.total) : running ? 0 : 100;
-          const summary = job.summary || {};
-          const failed = Object.entries(summary.failed || {});
-          const currentLine = running
-            ? cur.line_id
-              ? `${cur.line_id}（第 ${cur.index || "?"}/${cur.total || "?"} 句${cur.speaker ? `，${cur.speaker}` : ""}）`
-              : "準備中…"
-            : "";
-          progress.replaceChildren(
-            h(
-              "div",
-              { class: "row", style: "align-items:center;gap:8px" },
-              h("strong", {}, title),
-              h("span", { class: "grow" }),
-              running
-                ? h(
-                    "button",
-                    {
-                      class: "sm",
-                      onclick: async () => {
-                        try {
-                          await api(`/api/jobs/${job.id}/stop`, { method: "POST", body: {} });
-                        } catch (error) {
-                          fail(error);
-                        }
-                      },
+      if (tracker) tracker.close();
+      const running = (job) => job.status === "running" || job.status === "queued";
+      const paint = (job) => {
+        const active = running(job);
+        const title = active
+          ? "生成中"
+          : ({ done: "生成完成", stopped: "已停止", error: "結束（有錯誤）" }[job.status] || job.status);
+        const percent = job.progress
+          ? Math.round((100 * (job.progress.done || 0)) / (job.progress.total || 1))
+          : active ? 0 : 100;
+        const result = job.result || {};
+        const failed = Object.entries(result.failed || {});
+        progress.replaceChildren(
+          h(
+            "div",
+            { class: "row", style: "align-items:center;gap:8px" },
+            h("strong", {}, title),
+            h("span", { class: "grow" }),
+            active
+              ? h(
+                  "button",
+                  {
+                    class: "sm",
+                    onclick: async () => {
+                      try {
+                        if (tracker) await tracker.stop();
+                      } catch (error) {
+                        fail(error);
+                      }
                     },
-                    "■ 停止"
-                  )
-                : ""
-            ),
-            h("div", { class: "bar" }, h("i", { style: `width:${percent}%` })),
-            h("div", { class: "small" }, currentLine),
-            !running && summary.generated
-              ? h("div", { class: "small muted" }, `本次生成 ${summary.generated.length} 句、跳過 ${(summary.skipped || []).length} 句`)
-              : "",
-            failed.length
-              ? h("div", { class: "small bad" }, failed.slice(0, 8).map(([id, why]) => `${id}: ${why}`).join("；"))
-              : "",
-            !running ? h("div", { class: "row" }, h("button", { class: "sm", onclick: refresh }, "重新整理")) : ""
-          );
-          if (running) pollTimer = setTimeout(tick, POLL_MS);
-          else await refresh();
-        } catch (error) {
-          fail(error);
-        }
+                  },
+                  "■ 停止"
+                )
+              : ""
+          ),
+          h("div", { class: "bar" }, h("i", { style: `width:${percent}%` })),
+          h("div", { class: "small" }, active ? job.note || "準備中…" : ""),
+          !active && result.generated
+            ? h("div", { class: "small muted" }, `本次生成 ${result.generated.length} 句、跳過 ${(result.skipped || []).length} 句`)
+            : "",
+          failed.length
+            ? h("div", { class: "small bad" }, failed.slice(0, 8).map(([id, why]) => `${id}: ${why}`).join("；"))
+            : "",
+          !active ? h("div", { class: "row" }, h("button", { class: "sm", onclick: refresh }, "重新整理")) : ""
+        );
       };
-      tick();
+      tracker = FE.jobs.watch(jobId, {
+        base: "/api/fe-jobs",
+        onupdate: paint,
+        onend: (job) => {
+          paint(job);
+          refresh().catch(fail);
+        },
+      });
+      if (ctx && ctx.signal) {
+        ctx.signal.addEventListener("abort", () => { if (tracker) tracker.close(); }, { once: true });
+      }
     }
 
     function paintCast(doc, exists, data, modelData, speakerData) {
@@ -407,7 +407,7 @@
           class: "sm",
           onclick: async () => {
             try {
-              const latest = (await api(`${base}/cast`)).cast_voice || {};
+              const latest = (await api(`${base}/cast`, sig)).cast_voice || {};
               const chosen = custom.value.trim() || select.value.trim();
               if (chosen) latest.sherpa_model = chosen;
               else delete latest.sherpa_model;
@@ -540,12 +540,12 @@
 
     async function refresh() {
       const [data, cast, modelData] = await Promise.all([
-        api(base),
-        api(`${base}/cast`).catch(() => ({ cast_voice: {}, exists: false })),
-        api(`${base}/models`).catch(() => ({ models: [], current: "" })),
+        api(base, sig),
+        api(`${base}/cast`, sig).catch(() => ({ cast_voice: {}, exists: false })),
+        api(`${base}/models`, sig).catch(() => ({ models: [], current: "" })),
       ]);
       const currentModel = (cast.cast_voice && cast.cast_voice.sherpa_model) || modelData.current || "";
-      const speakerData = await api(`${base}/speakers?model=${encodeURIComponent(currentModel)}`)
+      const speakerData = await api(`${base}/speakers?model=${encodeURIComponent(currentModel)}`, sig)
         .catch(() => ({ available: false, speakers: [], message: "" }));
       const totals = data.totals || {};
       const info = h(
@@ -610,17 +610,18 @@
     return wrap;
   }
 
-  PAGES.voice = async function (bookId) {
-    crumbs([
+  FE.PAGES["book/:id/voice"] = async (ctx) => {
+    const bookId = ctx.params.id;
+    ctx.crumbs([
       { label: "書架", href: "#/" },
       { label: bookId, href: `#/book/${bookId}` },
       { label: "語音" },
     ]);
-    $("#view").replaceChildren(h("div", { class: "muted" }, "載入中…"));
+    ctx.view(h("div", { class: "muted" }, "載入中…"));
     try {
-      $("#view").replaceChildren(await render(bookId));
+      ctx.view(await render(bookId, ctx));
     } catch (error) {
-      $("#view").replaceChildren(h("div", { class: "card bad" }, error.message));
+      ctx.view(h("div", { class: "card bad" }, error.message));
     }
   };
 })();

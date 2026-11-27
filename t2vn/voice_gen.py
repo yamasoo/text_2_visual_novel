@@ -494,12 +494,13 @@ def _workflow_for(work: Path, backend: TtsBackend, line: voice_lines.VoiceLine, 
 
 def overview(work: Path, cast_doc: dict[str, Any] | None = None) -> dict[str, Any]:
     """語音頁要的資料：每個角色的聲線、句數、已生成／待生成、驗證錯誤。"""
-    doc = voice_lines.load_cast_voice(work)
-    if doc is None:
-        return {"ready": False, "message": "還沒有 voice/cast_voice.json", "characters": [], "roster": [],
-                "totals": {}, "errors": [], "lines": []}
+    stored = voice_lines.load_cast_voice(work)
     cast = cast_doc or _read_json(work / "cast.json", None)
-    errors = voice_lines.validate_cast_voice(doc, work, cast)
+    # 沒有 cast_voice.json 也要把 roster／lines 算出來：聲線表單要靠 roster 才列得出角色，
+    # 而那個檔就是在那張表單上存出來的（見 HANDOFF 的 P5 節）。
+    doc = stored or {"schema_version": voice_lines.SCHEMA_VERSION, "book_id": (cast or {}).get("book_id"),
+                     "engine": voice_lines.DEFAULT_ENGINE, "characters": {}}
+    errors = voice_lines.validate_cast_voice(doc, work, cast) if stored is not None else []
     characters = doc.get("characters") or {}
     voice_map = voice_lines.load_voice_map(work)
     entries = voice_map.get("lines") or {}
@@ -584,7 +585,8 @@ def overview(work: Path, cast_doc: dict[str, Any] | None = None) -> dict[str, An
         })
     roster.sort(key=lambda item: (role_order.get(item["role"], 9), item["char_id"]))
     return {
-        "ready": True, "book_id": doc.get("book_id"), "engine": engine,
+        "ready": stored is not None, "message": "" if stored is not None else "還沒有 voice/cast_voice.json",
+        "book_id": doc.get("book_id"), "engine": engine,
         "characters": sorted(chars, key=lambda c: c["char_id"]),
         "roster": roster,
         "missing_characters": missing,

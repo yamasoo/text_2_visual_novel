@@ -105,11 +105,14 @@ def asset_file(work: Path, rel: str) -> Path:
 
 # ------------------------------------------------------------------ 畫風設定
 
-def get_style(work: Path) -> dict[str, Any]:
+def get_style(work: Path, config: Any = None) -> dict[str, Any]:
     art = art_gen.load_art(work)
     comfy = art.get("comfy") or {}
     return {**{k: art.get(k, "") for k in STYLE_FIELDS}, "candidates": comfy.get("candidates", art_gen.DEFAULT_CANDIDATES),
-            "unet": comfy.get("unet", ""), "clip": comfy.get("clip", ""), "vae": comfy.get("vae", "")}
+            "kind": str(comfy.get("kind") or "anima"),
+            "profile": str(comfy.get("profile") or ""),
+            "unet": comfy.get("unet", ""), "clip": comfy.get("clip", ""), "vae": comfy.get("vae", ""),
+            "resolved": art_gen.describe_profile(art, config)}   # 這本書實際會用哪一組（介面顯示用）
 
 
 def save_style(config: Any, work: Path, data: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +121,17 @@ def save_style(config: Any, work: Path, data: dict[str, Any]) -> dict[str, Any]:
         if key in data:
             art[key] = str(data[key]).strip()
     comfy = dict(art.get("comfy") or {})
+    if "profile" in data:
+        name = str(data["profile"] or "").strip()
+        known = dict(getattr(config, "comfy_profiles", None) or {})
+        if name and known and name not in known:
+            raise ArtStudioError("找不到出圖 profile「%s」；設定頁目前有：%s" % (name, "、".join(known)))
+        comfy["profile"] = name
+    if "kind" in data:
+        kind = str(data["kind"] or "anima").strip().lower()
+        if kind not in art_gen.WORKFLOWS:
+            raise ArtStudioError("出圖模型只接受 anima 或 moss（目前是 %r）" % data["kind"])
+        comfy["kind"] = kind
     for key in ("unet", "clip", "vae"):
         if key in data:
             comfy[key] = str(data[key]).strip()
@@ -128,7 +142,7 @@ def save_style(config: Any, work: Path, data: dict[str, Any]) -> dict[str, Any]:
         comfy["candidates"] = count
     art["comfy"] = comfy
     art_gen.save_art(config, work, art)
-    return get_style(work)
+    return get_style(work, config)
 
 
 # ------------------------------------------------------------------ 外觀

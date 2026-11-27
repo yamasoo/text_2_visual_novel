@@ -33,11 +33,12 @@ OVERLAY: dict[str, dict[str, Any]] = {
         "models": [{"id": "deepseek-flash", "name": "DeepSeek Flash"}, {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"}],
     },
     "llamacpp": {"temperature": 0.3, "max_output": 16000},
+    "gemini": {"temperature": 0.3},
 }
 STRING_FIELDS = ("name", "base_url", "model", "key_env")
 INT_FIELDS = {"context_tokens": (1000, 10_000_000), "max_output": (16, 1_000_000)}
 FLOAT_FIELDS = {"temperature": (0.0, 2.0), "cjk_token_ratio": (0.2, 3.0), "price_in": (0.0, 1e6), "price_out": (0.0, 1e6)}
-ALLOWED_FIELDS = set(STRING_FIELDS) | set(INT_FIELDS) | set(FLOAT_FIELDS) | {"json_mode", "reasoning", "models", "extra"}
+ALLOWED_FIELDS = set(STRING_FIELDS) | set(INT_FIELDS) | set(FLOAT_FIELDS) | {"json_mode", "safety_relax", "reasoning", "models", "extra"}
 
 
 def _providers_module():
@@ -46,10 +47,10 @@ def _providers_module():
 
 
 def _builtin() -> list[dict[str, Any]]:
-    """內建供應商（只留 OpenAI 相容的；Claude Code 不走這條路）已套用本專案預設值。"""
+    """內建供應商（OpenAI 相容與 Google Gemini；Claude Code 不走這條路）已套用本專案預設值。"""
     out = []
     for p in _providers_module().DEFAULT_PROVIDERS:
-        if p.get("type") != "openai":
+        if p.get("type") not in ("openai", "gemini"):
             continue
         merged = copy.deepcopy(p)
         merged.update(copy.deepcopy(OVERLAY.get(p["id"], {})))
@@ -121,7 +122,7 @@ def _clean_field(pid: str, key: str, value: Any) -> Any:
         if not low <= number <= high:
             raise ConfigError(f"{where} must be between {low} and {high}")
         return number
-    if key == "json_mode":
+    if key in ("json_mode", "safety_relax"):
         if not isinstance(value, bool):
             raise ConfigError(f"{where} must be true or false")
         return value

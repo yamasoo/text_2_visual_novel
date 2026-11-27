@@ -16,12 +16,16 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+from .atomic import write_atomic
+
 EXPRESSIONS = ("neutral", "smile", "angry", "sad", "serious", "worried", "surprised")
+EXPRESSION_ALIASES = {"happy": "smile"}
 DEFAULT_EXPRESSIONS = ("neutral",)
 EXPRESSION_TAGS = {
     "neutral": "neutral expression, closed mouth",
@@ -88,9 +92,90 @@ def _normalize_expressions(value: Any) -> list[str]:
     """表情清單：只留認得的、去重、依 :data:`EXPRESSIONS` 的順序；空的話回預設。"""
     if not isinstance(value, (list, tuple)):
         return list(DEFAULT_EXPRESSION_LIST)
-    chosen = {item for item in value if isinstance(item, str) and item in EXPRESSIONS}
+    mapped = [EXPRESSION_ALIASES.get(item, item) for item in value if isinstance(item, str)]
+    chosen = {item for item in mapped if item in EXPRESSIONS}
     ordered = [expr for expr in EXPRESSIONS if expr in chosen]
     return ordered or list(DEFAULT_EXPRESSION_LIST)
+
+
+def expression_prompts_block(data: Any) -> dict[str, str] | None:
+    """角色專屬表情提示詞（選填）：對映別名（happy→smile）、只留認得的非空字串；空則回 None。"""
+    raw = data.get("expression_prompts") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    clean: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        mapped = EXPRESSION_ALIASES.get(key.strip().lower(), key.strip().lower())
+        if mapped not in EXPRESSIONS:
+            continue
+        text = _clean_field(value)
+        if text:
+            clean[mapped] = text
+    if not clean:
+        return None
+    return {expr: clean[expr] for expr in EXPRESSIONS if expr in clean}
+
+
+# --------------------------------------------------- T2C 子物件（D26，漫畫線用）
+T2C_SECTIONS = ("head", "body", "upper", "lower", "accessory")
+T2C_OUTFIT_PARTS = ("top", "bottom", "set")
+OUTFIT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+SHA1 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _phrases(value: Any) -> list[str]:
+    """字串或字串清單 → 去空白、去重、去空的短語清單。"""
+    items = value if isinstance(value, (list, tuple)) else ([value] if value else [])
+    out: list[str] = []
+    for item in items:
+        text = WHITESPACE_PATTERN.sub(" ", str(item or "")).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def t2c_block(data: Any) -> dict[str, Any] | None:
+    """外型卡的 t2c 子物件（D26）：清理後回傳；沒有、或清完是空的就回 None。
+
+    只做形狀清理（sections 的五段、outfits 的 top／bottom／set、source_sha1）；
+    不補值、不驗內容，內容規則由 vendor.t2c.bible_check 判定。
+    """
+    raw = data.get("t2c") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    sections = raw.get("sections")
+    if isinstance(sections, dict):
+        clean = {name: _phrases(sections.get(name)) for name in T2C_SECTIONS}
+        clean = {name: items for name, items in clean.items() if items}
+        if clean:
+            out["sections"] = clean
+    outfits = raw.get("outfits")
+    if isinstance(outfits, dict):
+        clean_outfits: dict[str, Any] = {}
+        for oid, parts in outfits.items():
+            key = str(oid or "").strip()
+            if not OUTFIT_ID.match(key) or not isinstance(parts, dict):
+                continue
+            fit = {name: _phrases(parts.get(name)) for name in T2C_OUTFIT_PARTS}
+            fit = {name: items for name, items in fit.items() if items}
+            if fit:
+                clean_outfits[key] = fit
+        if clean_outfits:
+            out["outfits"] = clean_outfits
+    sha = str(raw.get("source_sha1") or "").strip().lower()
+    if SHA1.match(sha):
+        out["source_sha1"] = sha
+    return out or None
+
+
+def prompt_fingerprint(card: Any) -> str:
+    """兩個提示詞串起來的 sha1；t2c.source_sha1 用它判斷人工值是否過期。"""
+    data = card if isinstance(card, dict) else {}
+    text = "\n".join(str(data.get(field) or "") for field in PROMPT_FIELDS)
+    return hashlib.sha1(text.encode(UTF8)).hexdigest()
 
 
 # -------------------------------------------------------------------- 外型卡
@@ -122,7 +207,7 @@ def normalize_card(data: Any, char_id: str | None = None) -> dict[str, Any]:
     if not isinstance(raw_id, str) or CHAR_ID.match(raw_id) is None:
         raise ValueError(f"char_id 不合法：{raw_id!r}")
 
-    return {
+    card = {
         "char_id": raw_id,
         "confirmed": bool(data.get("confirmed", False)),
         "headshot_prompt": _clean_field(data.get("headshot_prompt")),
@@ -130,6 +215,13 @@ def normalize_card(data: Any, char_id: str | None = None) -> dict[str, Any]:
         "expressions": _normalize_expressions(data.get("expressions")),
         "notes": _clean_field(data.get("notes")),
     }
+    expr_prompts = expression_prompts_block(data)
+    if expr_prompts is not None:
+        card["expression_prompts"] = expr_prompts
+    block = t2c_block(data)          # D26：有才寫，沒有就維持舊檔的形狀
+    if block is not None:
+        card["t2c"] = block
+    return card
 
 
 def load_card(path: str | Path) -> dict[str, Any]:
@@ -147,9 +239,8 @@ def save_card(card: dict[str, Any], path: str | Path) -> None:
         raise ValueError(
             f"char_id 與檔名不一致：{normalized['char_id']!r} != {target.stem!r}"
         )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding=UTF8
+    write_atomic(
+        target, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding=UTF8
     )
 
 
@@ -177,13 +268,20 @@ def resolve_card(
 # ---------------------------------------------------------------- 提示詞標籤
 
 
-def expression_tags(expr: str) -> str:
-    """表情 → 標籤；不認得 → ``ValueError``。"""
-    if expr not in EXPRESSION_TAGS:
+def expression_tags(expr: str, card: dict[str, Any] | None = None) -> str:
+    """表情 → 標籤；若 ``card`` 有該表情的專屬描述優先使用；不認得 → ``ValueError``。"""
+    key = EXPRESSION_ALIASES.get(expr, expr)
+    if key not in EXPRESSION_TAGS:
         raise ValueError(
             f"不認得的表情：{expr!r}（可用：{', '.join(EXPRESSIONS)}）"
         )
-    return EXPRESSION_TAGS[expr]
+    if isinstance(card, dict):
+        custom = (card.get("expression_prompts") or {}).get(key)
+        if isinstance(custom, str) and custom.strip():
+            cleaned = _clean_tags(custom)
+            if cleaned:
+                return cleaned
+    return EXPRESSION_TAGS[key]
 
 
 def headshot_tags(card: dict[str, Any]) -> str:

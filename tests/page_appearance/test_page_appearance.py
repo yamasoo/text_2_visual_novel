@@ -16,7 +16,8 @@ def js():
 
 
 def test_registers_page_and_component(js):
-    assert re.search(r"PAGES\.appearance\s*=\s*async\s+function", js)
+    # 頁面改由 fekit 註冊：路由字串 + ctx（原本是 PAGES.appearance = async function (bookId)）。
+    assert re.search(r'FE\.PAGES\["book/:id/appearance"\]\s*=\s*async\s*\(\s*ctx\s*\)', js)
     assert re.search(r"window\.AppearanceCards\s*=", js)
     assert re.search(r"\brender\b", js)
 
@@ -37,7 +38,8 @@ def test_uses_every_endpoint(js):
     for piece in ("/cards", "/cards/roll", "/cards/generate", "/draft", "/wildcards", "/wildcards/enabled",
                   "/styles", "/styles/upload", "/styles/apply", "/styles/clear", "/file?path="):
         assert piece in js, piece
-    assert "uploadFile(" in js
+    # 畫風表上傳改走 fekit 的 FE.upload（原本是頁面自己的 uploadFile()）。
+    assert "FE.upload(" in js
     assert "/styles/import" not in js, "畫風表改成選檔上傳，不再輸入路徑"
 
 
@@ -74,7 +76,8 @@ def test_per_character_generate_block(js):
 def test_uses_helpers_from_app(js):
     for helper in ("h(", "api(", "toast(", "fail(", "badge(", "crumbs("):
         assert helper in js, helper
-    assert "AiPanel.executor" in js and "AiPanel.poll" in js
+    # AiPanel.executor → Executors.value、AiPanel.poll → Panel.attach。
+    assert "Executors.value" in js and "Panel.attach" in js
 
 
 def test_no_hardcoded_book_or_host(js):
@@ -85,3 +88,11 @@ def test_no_hardcoded_book_or_host(js):
 def test_syntax_ok_with_node():
     result = subprocess.run(["node", "--check", str(SRC)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_t2c_editor_wired_to_check_endpoint(js):
+    for piece in ("T2C_SECTIONS", "T2C_OUTFIT_PARTS", "/check", "漫畫卡檢查", "用提示詞粗拆初稿", "重設指紋"):
+        assert piece in js, piece
+    assert "payload.t2c = t2c" in js, "存檔要把 t2c 一起送"
+    assert "source_sha1" in js, "重設指紋要沿用／更新 source_sha1"
+    assert "check_card 沒有問題" in js
